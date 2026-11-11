@@ -644,6 +644,13 @@ impl TableView {
             g.refresh(cx);
             if let Some((r, c)) = new_sel {
                 g.set_selected_cell(r, c, cx);
+            } else if let Some((r, c)) = g.selected_cell() {
+                // A reload with fewer rows (a new filter, the last page) keeps the cursor on a
+                // row that exists; otherwise the record panel shows a row that is not there.
+                let rows = g.delegate().model.row_count();
+                if rows > 0 && r >= rows {
+                    g.set_selected_cell(rows - 1, c, cx);
+                }
             }
         });
         self.loaded_once = true;
@@ -859,6 +866,10 @@ impl TableView {
     fn selected(&self, cx: &App) -> Option<(usize, usize)> {
         let g = self.grid.read(cx);
         let (r, c) = g.selected_cell()?;
+        // Out of range after a reload that returned fewer rows: no selection.
+        if r >= g.delegate().model.row_count() {
+            return None;
+        }
         g.delegate().data_col(c).map(|d| (r, d))
     }
 
