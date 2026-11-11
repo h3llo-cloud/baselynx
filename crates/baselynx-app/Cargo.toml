@@ -1,0 +1,26 @@
+[package]
+name = "baselynx-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "baselynx"
+path = "src/main.rs"
+
+[dependencies]
+baselynx-core = { path = "../baselynx-core" }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter", "tree-sitter-sql"] }
+directories = "6"
+uuid = { version = "1.29", features = ["v4"] }
+serde_json = "1"
+lsp-types = "0.97"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter", "tree-sitter-sql", "test-support"] }
+postgresql_embedded = { version = "0.22", default-features = false, features = ["theseus", "tokio", "tls-rustls-ring"] }
+tempfile = "3"

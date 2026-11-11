@@ -1,0 +1,71 @@
+# ---- Build output ----------------------------------------------------------
+/target/
+**/target/
+/dist/
+/out/
+
+# ---- Binaries and libraries (Linux, macOS, Windows) ------------------------
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dSYM/
+*.rlib
+*.rmeta
+*.wasm
+
+# ---- Installers and packages -----------------------------------------------
+*.msi
+*.msix
+*.appx
+*.dmg
+*.pkg
+*.app/
+*.AppImage
+*.deb
+*.rpm
+*.snap
+*.flatpak
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# ---- Your own config and data: real hosts, kubeconfig paths, passwords ------
+/baselynx.yaml
+/baselynx.yaml.bak
+/baselynx.yaml.tmp
+/backups/
+*.dump
+*.part
+*.partial/
+
+# ---- Editors and operating systems -----------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---- Local AI-assistant files ----------------------------------------------
+.claude/
+CLAUDE.local.md
+
+# ---- Local-only notes and old screenshots (not published) ------------------
+/trd/
+/docs/screens/

@@ -1,0 +1,179 @@
+# baselynx
+
+> baselynx is a fast desktop client for PostgreSQL only (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain PostgreSQL servers and to databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups with pg_dump. Its databases come from one YAML file, `baselynx.yaml`. Licence: 0BSD.
+
+This file tells a coding agent how to build, run and test baselynx on each system, and how to write its config file. Facts here match the code in this repository; when in doubt, read `baselynx.example.yaml` and `crates/baselynx-core/src/config.rs`.
+
+## Repository
+
+- `Cargo.toml`: a workspace of two crates.
+- `crates/baselynx-core`: database, Kubernetes, config file, backups and restores, storage. No UI dependency. Library name `baselynx_core`.
+- `crates/baselynx-app`: the GPUI Kit application. Package `baselynx-app`, binary `baselynx`.
+- `baselynx.example.yaml`: every config key, with comments. Copy it to `baselynx.yaml`.
+- `fixtures/seed.sql`: test data for the integration tests.
+- `README.md`: features, keyboard shortcuts, backups and restores in detail.
+
+## Build
+
+Rust 1.92 or later, installed with rustup (stable). The first build compiles about 900 crates and takes several minutes; later builds are incremental.
+
+```sh
+cargo build --release -p baselynx-app   # binary: target/release/baselynx (baselynx.exe on Windows)
+cargo run --release -p baselynx-app     # build and start
+cargo run -p baselynx-app               # debug build; GPUI crates are still optimised (see [profile.dev.package])
+```
+
+### Windows 10 or later
+
+1. Install Visual Studio 2022 Build Tools with the "Desktop development with C++" workload (MSVC compiler and Windows SDK).
+2. Install Rust with rustup and keep the default `x86_64-pc-windows-msvc` toolchain (not the GNU one).
+3. Put CMake on `PATH` (it comes with the Build Tools, or install it separately).
+4. `cargo build --release -p baselynx-app`. Release builds have no console window.
+
+This is the system the build is verified on.
+
+### macOS 15 or later
+
+1. `xcode-select --install` (Command Line Tools; GPUI renders with Metal).
+2. Install Rust with rustup.
+3. `cargo build --release -p baselynx-app`.
+
+The binary is not signed or bundled as an `.app`; run it from a terminal, or sign and bundle it yourself.
+
+### Linux
+
+A Wayland or X11 session with a working Vulkan driver is needed to run it. Build packages on Ubuntu 24.04 / Debian:
+
+```sh
+sudo apt install -y gcc g++ clang pkg-config libfontconfig-dev libfreetype-dev libwayland-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libssl-dev libzstd-dev \
+  libasound2-dev libvulkan1 mesa-vulkan-drivers
+```
+
+Fedora:
+
+```sh
+sudo dnf install -y gcc gcc-c++ clang pkgconf fontconfig-devel freetype-devel wayland-devel \
+  libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel openssl-devel libzstd-devel \
+  alsa-lib-devel vulkan-loader mesa-vulkan-drivers
+```
+
+Saved passwords use the Secret Service (GNOME Keyring or KWallet) over D-Bus; without one, baselynx asks for passwords each session. If a `-sys` crate fails to build, the missing package is named in the error; install its `-dev`/`-devel` package.
+
+## Run
+
+- `target/release/baselynx` starts the app. It opens `baselynx.yaml` when it finds one (see "Where the config file is looked for"), otherwise the last project.
+- Backups and restores need `pg_dump`, `pg_restore` and `psql` (PostgreSQL client tools, ideally the same major version as the servers or newer). They are taken from `backups.tools` in the config file, else `PATH`, else on Windows the newest `C:\Program Files\PostgreSQL\<version>\bin`. Debian/Ubuntu: `sudo apt install postgresql-client`; macOS: `brew install libpq` and add its `bin` to `PATH`.
+
+Environment variables:
+
+- `BASELYNX_CONFIG_FILE=/path/to/baselynx.yaml`: open this config file at start.
+- `BASELYNX_CONFIG_DIR=/path/to/dir`: keep projects and settings in this directory instead of the user's configuration directory. When set, a `baselynx.yaml` next to the binary is NOT opened (unless `BASELYNX_CONFIG_FILE` names one). Use it for tests and experiments so a run never connects to real databases.
+- `BASELYNX_THEME=light|dark`: pin the theme.
+
+## Test
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+- Integration tests need a PostgreSQL server. With `BASELYNX_TEST_DSN=postgres://user:password@host:5432/postgres` (a role that may create databases) they use it. Without it they download PostgreSQL once (network needed on the first run) into `target/baselynx-testdb` and start it on `127.0.0.1:54329`, password `baselynx-test`; it keeps running for later runs.
+- The window tests need two exact pins in `Cargo.lock`: `taffy 0.15.0` and `unicode-properties 0.1.3`. Do not run a bare `cargo update`; if it happened, run `cargo update -p taffy --precise 0.15.0` and `cargo update -p unicode-properties --precise 0.1.3`.
+- `crates/baselynx-core/tests/kube_live.rs` is an ignored, read-only check against a real cluster (`BASELYNX_LIVE_CONFIG`, `BASELYNX_LIVE_DB`, `--ignored`).
+
+## Create the config file
+
+The file is YAML, named `baselynx.yaml`. Unknown keys are errors (the message names the key and its line). Relative paths are relative to the file. `~/` is the home directory.
+
+Smallest useful file:
+
+```yaml
+version: 1
+project: My databases
+servers:
+  local: postgres://postgres:secret@127.0.0.1:5432/postgres?sslmode=disable
+```
+
+Full shape:
+
+```yaml
+version: 1                        # required, always 1
+project: Shop                     # required: the project the file opens as
+
+backups:                          # optional; every key optional
+  directory: backups              # default "backups", relative to this file
+  tools: /usr/lib/postgresql/17/bin   # where pg_dump, pg_restore, psql are
+  formats: [dump]                 # default formats: dump and/or sql
+  keep: {last: 7, daily: 14, weekly: 8, monthly: 12}
+  timeout: 30m                    # one pg_dump's limit
+
+servers:                          # databases reached directly
+  analytics: postgres://report:secret@db.example.com:5432/analytics?sslmode=require   # a connection string
+  staging:
+    url: postgresql://shop@staging.example.com/shop   # a string plus keys that override its parts
+    password: secret
+  local:                          # or keys only
+    name: Local shop              # shown name; default: the key
+    host: 127.0.0.1               # required unless url gives it
+    port: 5432                    # default 5432
+    database: shop                # required unless url gives it
+    user: shop                    # required unless url gives it
+    password: secret              # optional, plain text; omitted: asked once, kept in the OS keyring
+    ssl: prefer                   # disable | prefer | require | verify-full
+    mode: read-write              # read-write | read-only
+    color: green                  # none | green | amber | red
+    backup: {every: 12h, formats: [sql]}
+    allow_restore: true           # let "Restore from backup" write here (only into an empty database)
+
+clusters:                         # databases inside Kubernetes
+  shop-prod:                      # any name; shown as "<cluster> · <database>"
+    kubeconfig: ~/.kube/shop-prod.yaml   # required
+    context: shop-prod-admin      # optional; default: the kubeconfig's current context
+    color: red                    # optional; default red when the name contains "prod"
+    namespaces:                   # Kubernetes namespace -> databases in it
+      billing:
+        orders-db:
+          service: orders-db-rw   # the primary's Service; or `pod: orders-db-0` instead
+          replica: orders-db-ro   # optional: read-only mode and backups use it
+          port: 5432              # the Service (or container) port; default 5432
+          credentials: orders-db-credentials   # a Secret in the namespace with keys database, username, password (or connection-string)
+          # or: credentials: {secret: app-secret, keys: {database: dbname, user: username, password: password}}
+          # or: credentials: {database: shop, user: shop, password: secret}
+          mode: read-only
+          backup:                 # optional; `backup: true` = every 24h with the default formats
+            every: 24h            # at most one backup per interval, taken when baselynx starts
+            formats: [dump, sql]
+            from: replica         # replica (default; falls back to the primary) | primary
+            row_security: true    # pg_dump --enable-row-security
+            exclude_tables: [public.tmp_import]
+            keep: {last: 3}
+          allow_restore: false
+```
+
+Rules worth knowing:
+
+- Durations: `90s`, `30m`, `12h`, `1d`, or sums like `1h30m`.
+- The file is the source of truth for the connections it lists: at every start they are updated from it, new ones added, ones no longer listed removed. Connections made by hand in the app stay.
+- Passwords written in the file are used as they are and kept in memory only. Keep the file private; `baselynx.yaml` is in `.gitignore`. Never commit a real one; commit changes to `baselynx.example.yaml` instead, with fake values.
+- `allow_restore: true` should only be set on a database meant to receive a disaster restore. A restore also requires a read-write connection, an unchanged backup, an empty target database, and typing the database's name.
+- In the app, File → Edit config file edits and validates the file, keeps `baselynx.yaml.bak`, and reloads.
+
+## Where the config file is looked for
+
+1. `BASELYNX_CONFIG_FILE`, when set.
+2. Otherwise, unless `BASELYNX_CONFIG_DIR` is set: `baselynx.yaml` next to the binary; for a binary in `target/debug` or `target/release`, also the repository root (so `cargo run` finds `./baselynx.yaml`).
+3. File → Open config file… in the app.
+
+## Where data is stored
+
+- Projects and settings: `%APPDATA%\baselynx\config` (Windows), `~/Library/Application Support/baselynx` (macOS), `~/.config/baselynx` (Linux), or `BASELYNX_CONFIG_DIR`. No passwords there.
+- Saved passwords: the OS credential store, service `baselynx`.
+- Backups: `backups.directory`, one folder per database and per backup, each with a `manifest.json` holding SHA-256 sums.
+
+## Rules for agents changing the code
+
+- Never run the app or tests against databases you were not given for testing; set `BASELYNX_CONFIG_DIR` to a scratch directory when starting the app.
+- Check GPUI Kit APIs in its source (`~/.cargo/registry/src/*/gpui-component-*/`) or at https://gpui-kit.com before using them; names change between versions.
+- Keep `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` clean.

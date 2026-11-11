@@ -1,0 +1,86 @@
+# baselynx config file. Copy it to baselynx.yaml next to the baselynx binary (or into the
+# repository root when running a target/debug or target/release build): baselynx then opens it
+# at every start. Or use File → Open config file…. baselynx.yaml is in .gitignore: it names real
+# clusters and may hold passwords.
+#
+# The file is the source of truth for the databases it lists: at every start they are updated
+# from it, new ones are added and ones no longer listed are removed. Connections added by hand
+# in the same project stay. Names and colours changed in the app stay unless the file sets them.
+
+version: 1                    # the format's version
+project: Shop                 # the project this file opens as
+
+# Where backups go and how many are kept. Every key is optional.
+backups:
+  directory: backups          # relative to this file; one folder per database, one per backup
+  # tools: C:/Program Files/PostgreSQL/18/bin   # pg_dump, pg_restore, psql; default: PATH, then
+  #                                             # the newest PostgreSQL installation on Windows
+  formats: [dump]             # default formats: dump (pg_dump -Fc) and/or sql
+                              # (schema.sql, data.sql, indexes.sql)
+  keep: {last: 7, daily: 14, weekly: 8, monthly: 12}   # the newest backup is always kept
+  timeout: 30m                # how long one pg_dump may run
+
+# Databases in Kubernetes, reached through a port-forward baselynx opens itself.
+clusters:
+  shop-prod:                              # a name of your choosing
+    kubeconfig: ~/.kube/shop-prod.yaml    # relative paths are relative to this file
+    # context: shop-prod-admin            # default: the kubeconfig's current context
+    # color: red                          # none, green, amber, red; default red when the
+    #                                     # cluster's name contains "prod"
+    namespaces:                           # Kubernetes namespace → databases in it
+      billing:
+        orders-db:                        # shown as "shop-prod · orders-db"
+          service: orders-db-rw           # the primary's service (or `pod: orders-db-0`)
+          replica: orders-db-ro           # read-only mode and backups use the replicas
+          # port: 5432                    # the service port; default 5432
+          credentials: orders-db-credentials   # a secret in the namespace with database,
+          #                                    # username and password keys
+          mode: read-write                # or read-only: every transaction read-only,
+          #                                 through the replica when there is one
+          backup:                         # optional; `backup: true` means every 24h
+            every: 24h                    # at most one backup per 24 hours, taken at start-up
+            formats: [dump, sql]          # default: backups.formats
+            from: replica                 # replica (default; the primary if it fails) or primary
+            # row_security: true          # for tables that force row-level security
+            # exclude_tables: [public.tmp_import]
+            # keep: {last: 3}             # overrides backups.keep for this database
+      partners:
+        partner-db:
+          name: Partners (prod)           # the name shown, instead of "shop-prod · partner-db"
+          service: partner-db-rw
+          credentials:
+            secret: partner-db-app
+            keys: {database: dbname, user: username, password: password}   # other key names
+          mode: read-only
+
+  shop-dr:
+    kubeconfig: ~/.kube/shop-dr.yaml
+    color: amber
+    namespaces:
+      billing:
+        orders-db:
+          service: orders-db-rw
+          credentials: orders-db-credentials
+          # "Restore from backup…" writes only into databases that say so, and only when the
+          # database is empty, the connection is read-write, the backup's checksums match and
+          # you type the database's name. Leave it out for anything that holds data.
+          allow_restore: true
+
+# Databases reached directly: a connection string, or keys. A password written here (in the
+# string or as `password:`) is used as it is and kept only in memory; leave it out and baselynx
+# asks once and keeps the answer in the system keyring.
+servers:
+  analytics: postgres://report:not-a-real-password@db.example.com:5432/analytics?sslmode=require
+  staging:
+    url: postgresql://shop@staging.example.com/shop
+    password: not-a-real-password # overrides the string's parts, like every key below
+    color: amber
+  local:
+    host: 127.0.0.1
+    port: 5432
+    database: shop
+    user: shop
+    ssl: prefer                   # disable, prefer, require, verify-full
+    color: green
+    backup: {every: 12h, formats: [sql]}
+    allow_restore: true
