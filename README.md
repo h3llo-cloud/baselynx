@@ -6,6 +6,12 @@ Kubernetes (through its own port-forwards), and takes and restores backups.
 
 Free software under the [BSD Zero Clause licence](LICENSE): use it, change it, ship it, no conditions.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-light.png">
+  <img alt="baselynx: a filtered customers table with the record panel open" src="docs/images/hero-dark.png">
+</picture>
+
 - Several databases connected at once, grouped in projects you switch between; Kubernetes databases grouped
   by cluster in a sidebar you can filter and drive from the keyboard
 - Query console: run the statement at the caret, a selection, or the whole script; cancel; completion of
@@ -27,6 +33,36 @@ Free software under the [BSD Zero Clause licence](LICENSE): use it, change it, s
   (dump or SQL) and guarded restores
 - Ctrl+K jumps to any table of any connected database, a row (`customers 42`), a recent query (`>`), or a
   command
+
+## A tour
+
+**Edit like a spreadsheet.** Select a range in a column with Shift+click, add cells with Ctrl+click, type
+once: every selected cell takes the value, as one undo step. On a production (red) connection the commit
+shows the exact SQL first.
+
+![Selecting cells in a column, typing one value, reviewing the UPDATEs](docs/images/bulk-edit.gif)
+
+**Get anywhere fast.** Menus open under the pointer. Ctrl+K finds any table of any connected database,
+a recent query, a command, or a row: `customers 42` opens that customer.
+
+![Menus opening on hover, then Ctrl+K jumping to customers 42](docs/images/navigation.gif)
+
+**Query console.** Completion from the catalog, errors underlined where the server points, a result tab per
+statement, and guarded writes on red and amber connections.
+
+![The query console with a revenue-by-country query and its result](docs/images/console.png)
+
+| | |
+|---|---|
+| ![Ctrl+K palette searching for "ord"](docs/images/palette.png) | ![Commit review listing the generated UPDATE statements](docs/images/commit-review.png) |
+| **Ctrl+K** finds tables across every connection | **Commit review** shows the SQL before it runs |
+| ![Backups view with schedules, last backups and states](docs/images/backups.png) | ![Restore dialog with every guardrail checked](docs/images/restore.png) |
+| **Backups** on a schedule, with status per database | **Restores** only after every guardrail passes |
+
+![The config file editor](docs/images/config-editor.png)
+
+One `baselynx.yaml` describes every server and Kubernetes database, with schedules and modes; the app edits
+and checks it in place.
 
 ## Quick start
 
