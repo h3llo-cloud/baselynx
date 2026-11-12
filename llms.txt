@@ -1,6 +1,6 @@
 # baselynx
 
-> baselynx is a fast desktop client for PostgreSQL only (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain PostgreSQL servers and to databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups with pg_dump. Its databases come from one YAML file, `baselynx.yaml`. Licence: 0BSD.
+> baselynx is a fast desktop client for PostgreSQL only (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain PostgreSQL servers and to databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups with pg_dump. Its databases come from one YAML file, `baselynx.yaml`. Licence: MIT OR Apache-2.0.
 
 This file tells a coding agent how to build, run and test baselynx on each system, and how to write its config file. Facts here match the code in this repository; when in doubt, read `baselynx.example.yaml` and `crates/baselynx-core/src/config.rs`.
 

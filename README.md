@@ -4,7 +4,7 @@ A fast desktop client for PostgreSQL only, for Windows, macOS and Linux. Rust, w
 [GPUI Kit](https://gpui-kit.com). It starts instantly, connects to plain servers and to databases inside
 Kubernetes (through its own port-forwards), and takes and restores backups.
 
-Free software under the [BSD Zero Clause licence](LICENSE): use it, change it, ship it, no conditions.
+Free software, dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your choice.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
@@ -299,8 +299,8 @@ stopping it, start it again with
 
 ## Licence
 
-[0BSD](LICENSE) (BSD Zero Clause): permission to use, copy, modify and distribute, with or without fee,
-and no requirement to keep a notice. Binaries you build also contain the dependencies, under their own
-licences: baselynx's dependencies are under MIT, BSD, Apache-2.0, ISC, Zlib, Unicode or the PostgreSQL
+Licensed under either of [MIT](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE), at your option. Unless you
+say otherwise, any contribution you submit for inclusion is dual-licensed the same way, without additional
+terms. Binaries you build also contain the dependencies, under their own licences: baselynx's dependencies are under MIT, BSD, Apache-2.0, ISC, Zlib, Unicode or the PostgreSQL
 licence. GPUI's font stack brings in three MPL-2.0 crates (`dwrote`, `option-ext`, and `cbindgen` as a macOS
 build tool); MPL-2.0 is file-level copyleft and applies to those crates only.
