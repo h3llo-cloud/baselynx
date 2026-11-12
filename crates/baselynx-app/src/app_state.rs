@@ -5,7 +5,7 @@ use gpui_kit::*;
 use std::sync::Arc;
 
 use baselynx_core::catalog::RelationRef;
-use baselynx_core::model::{ConnectionColor, ConnectionConfig};
+use baselynx_core::model::{ConnectionColor, ConnectionConfig, Engine};
 use uuid::Uuid;
 
 /// What a tab needs to open its own session.
@@ -21,11 +21,7 @@ pub struct ConnTarget {
 
 impl ConnTarget {
     pub fn label(&self) -> ConnLabel {
-        ConnLabel {
-            id: self.config.id,
-            name: self.config.name.clone(),
-            color: self.config.color,
-        }
+        ConnLabel::of(&self.config)
     }
 }
 
@@ -34,6 +30,23 @@ pub struct ConnLabel {
     pub id: Uuid,
     pub name: String,
     pub color: ConnectionColor,
+    /// Decides how the tab writes SQL (quoting, splitting).
+    pub engine: Engine,
+}
+
+impl ConnLabel {
+    pub fn of(config: &ConnectionConfig) -> Self {
+        Self {
+            id: config.id,
+            name: config.name.clone(),
+            color: config.color,
+            engine: config.engine,
+        }
+    }
+
+    pub fn dialect(&self) -> baselynx_core::sql::Dialect {
+        self.engine.dialect()
+    }
 }
 
 /// Emitted by tabs so the workspace saves and re-renders.

@@ -394,16 +394,12 @@ pub fn context(text: &str, cursor: usize, is_schema: &dyn Fn(&str) -> bool) -> C
 
 /// An identifier as it must be written: bare when it is lower case and plain, quoted
 /// otherwise.
-pub fn ident_sql(name: &str) -> String {
+pub fn ident_sql(name: &str, d: sql::Dialect) -> String {
     let plain = name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if plain {
-        name.to_string()
-    } else {
-        sql::quote_ident(name)
-    }
+    if plain { name.to_string() } else { d.quote_ident(name) }
 }
 
 #[cfg(test)]
@@ -491,7 +487,8 @@ mod tests {
             vec![t(None, "My T", Some("m")), t(Some("public"), "b", None)]
         );
         assert_eq!(table_refs("delete from only t where a = 1"), vec![t(None, "t", None)]);
-        assert_eq!(ident_sql("customers"), "customers");
-        assert_eq!(ident_sql("Weird Name"), "\"Weird Name\"");
+        assert_eq!(ident_sql("customers", sql::Dialect::Postgres), "customers");
+        assert_eq!(ident_sql("Weird Name", sql::Dialect::Postgres), "\"Weird Name\"");
+        assert_eq!(ident_sql("Weird Name", sql::Dialect::MySql), "`Weird Name`");
     }
 }

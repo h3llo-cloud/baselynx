@@ -26,6 +26,8 @@ const MAX_ITEMS: usize = 50;
 /// What completion draws on; the console updates it when its connection changes.
 #[derive(Default)]
 pub struct Source {
+    /// How identifiers are quoted when one is inserted.
+    pub dialect: baselynx_core::sql::Dialect,
     pub relations: Arc<Vec<RelationRef>>,
     /// The connection's catalog session, for the first fetch of a table's columns.
     pub catalog: Option<Arc<Session>>,
@@ -117,6 +119,7 @@ impl CompletionProvider for SqlCompletion {
         let relations = src.relations.clone();
         let catalog = src.catalog.clone();
         let cache = src.columns.clone();
+        let dialect = src.dialect;
         drop(src);
         let ctx = completion::context(&text, offset, &|s| relations.iter().any(|r| r.schema == s));
         let range = lsp_types::Range {
@@ -141,10 +144,11 @@ impl CompletionProvider for SqlCompletion {
                     };
                     for (n, i) in order.into_iter().enumerate() {
                         let r = pool[i];
-                        let insert = if schema.is_some() || r.schema == "public" {
-                            ident_sql(&r.name)
+                        // `public` (Postgres) and `main` (SQLite) are found without a schema.
+                        let insert = if schema.is_some() || matches!(r.schema.as_str(), "public" | "main") {
+                            ident_sql(&r.name, dialect)
                         } else {
-                            format!("{}.{}", ident_sql(&r.schema), ident_sql(&r.name))
+                            format!("{}.{}", ident_sql(&r.schema, dialect), ident_sql(&r.name, dialect))
                         };
                         let kind = if r.kind.is_table() {
                             CompletionItemKind::CLASS
@@ -173,7 +177,7 @@ impl CompletionProvider for SqlCompletion {
                         for (n, (_, _, (name, ty))) in found.into_iter().take(MAX_ITEMS).enumerate() {
                             items.push(item(
                                 name.clone(),
-                                ident_sql(name),
+                                ident_sql(name, dialect),
                                 Some(ty.clone()),
                                 CompletionItemKind::FIELD,
                                 range,
@@ -199,7 +203,7 @@ impl CompletionProvider for SqlCompletion {
                                     m,
                                     0,
                                     name.clone(),
-                                    ident_sql(name),
+                                    ident_sql(name, dialect),
                                     Some(ty.clone()),
                                     CompletionItemKind::FIELD,
                                 ));

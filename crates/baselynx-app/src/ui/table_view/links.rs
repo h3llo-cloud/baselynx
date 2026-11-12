@@ -73,7 +73,7 @@ impl TableView {
             return;
         };
         let values = self.values(row, &fk.from_cols, cx);
-        let Some(filter) = key_filter(&fk.to_cols, &values) else {
+        let Some(filter) = key_filter(&fk.to_cols, &values, self.conn.dialect()) else {
             return;
         };
         self.peek = None;
@@ -109,12 +109,12 @@ impl TableView {
             return false;
         };
         let values = self.values(row, &fk.from_cols, cx);
-        let Some(filter) = key_filter(&fk.to_cols, &values) else {
+        let Some(filter) = key_filter(&fk.to_cols, &values, self.conn.dialect()) else {
             return false;
         };
         let sql = format!(
             "SELECT * FROM {} WHERE {filter} LIMIT 1",
-            baselynx_core::sql::quote_qualified(&fk.to_schema, &fk.to_table)
+            self.conn.dialect().qualified(&fk.to_schema, &fk.to_table)
         );
         let title: SharedString = format!("{}.{}", fk.to_schema, fk.to_table).into();
         let task = cx.spawn(async move |this, cx| {
@@ -131,7 +131,7 @@ impl TableView {
                                     .zip(r)
                                     .take(8)
                                     .map(|(m, v)| {
-                                        let boolean = m.type_oid == Some(16);
+                                        let boolean = m.is_boolean();
                                         let v = v
                                             .as_deref()
                                             .map(|s| crate::ui::grid::display_value(s, boolean).into_owned());
@@ -152,7 +152,7 @@ impl TableView {
             target: (
                 fk.to_schema.clone(),
                 fk.to_table.clone(),
-                key_filter(&fk.to_cols, &values).unwrap_or_default(),
+                key_filter(&fk.to_cols, &values, self.conn.dialect()).unwrap_or_default(),
             ),
             fields: Vec::new(),
             error: None,
@@ -342,7 +342,12 @@ impl TableView {
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.glance = None;
-                                let cond = table::quick_filter(&col, &CellValue::Text(value.clone()), false);
+                                let cond = table::quick_filter(
+                                    &col,
+                                    &CellValue::Text(value.clone()),
+                                    false,
+                                    this.conn.dialect(),
+                                );
                                 let filter = table::append_filter(this.filter.as_deref(), &cond);
                                 this.filter_input
                                     .update(cx, |i, cx| i.set_value(filter.clone(), window, cx));
@@ -451,7 +456,7 @@ impl TableView {
         };
         let Some((row, _)) = self.selected(cx) else { return };
         let values = self.values(row, &fk.to_cols, cx);
-        let Some(filter) = key_filter(&fk.from_cols, &values) else {
+        let Some(filter) = key_filter(&fk.from_cols, &values, self.conn.dialect()) else {
             return;
         };
         cx.emit(TabEvent::OpenTable {
@@ -556,10 +561,10 @@ impl TableView {
             .iter()
             .map(|f| {
                 let values = self.values(row, &f.to_cols, cx);
-                key_filter(&f.from_cols, &values).map(|filter| {
+                key_filter(&f.from_cols, &values, self.conn.dialect()).map(|filter| {
                     format!(
                         "SELECT count(*) FROM (SELECT 1 FROM {} WHERE {filter} LIMIT {}) s",
-                        baselynx_core::sql::quote_qualified(&f.from_schema, &f.from_table),
+                        self.conn.dialect().qualified(&f.from_schema, &f.from_table),
                         CHILD_CAP + 1
                     )
                 })

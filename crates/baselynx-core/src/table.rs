@@ -11,7 +11,7 @@ use crate::exec::{self, ColumnMeta, Row};
 use crate::model::SortDir;
 use crate::runtime;
 use crate::session::Session;
-use crate::sql::{has_top_level_semicolon, quote_ident, quote_literal, quote_qualified, split};
+use crate::sql::{Dialect, has_top_level_semicolon_in, split_in};
 
 pub const PAGE_SIZES: [u32; 4] = [100, 500, 1000, 5000];
 pub const DEFAULT_PAGE_SIZE: u32 = 500;
@@ -37,8 +37,8 @@ pub struct Page {
 }
 
 /// Checks a filter before it is sent: one expression, no second statement.
-pub fn validate_filter(filter: &str) -> Result<()> {
-    if has_top_level_semicolon(filter) || split(filter).len() > 1 {
+pub fn validate_filter(filter: &str, dialect: Dialect) -> Result<()> {
+    if has_top_level_semicolon_in(filter, dialect) || split_in(filter, dialect).len() > 1 {
         return Err(CoreError::Invalid(
             "The filter must be a single condition without a semicolon.".into(),
         ));
@@ -51,26 +51,22 @@ fn normalized_filter(filter: &Option<String>) -> Option<&str> {
 }
 
 /// `SELECT * FROM … WHERE (…) ORDER BY …`, optionally with `LIMIT page_size + 1 OFFSET …`.
-pub fn build_select(req: &PageRequest, row_key: Option<&[String]>, paged: bool) -> Result<String> {
-    let mut sql = format!("SELECT * FROM {}", quote_qualified(&req.schema, &req.table));
+pub fn build_select(req: &PageRequest, row_key: Option<&[String]>, paged: bool, d: Dialect) -> Result<String> {
+    let mut sql = format!("SELECT * FROM {}", d.qualified(&req.schema, &req.table));
     if let Some(f) = normalized_filter(&req.filter) {
-        validate_filter(f)?;
+        validate_filter(f, d)?;
         sql.push_str(&format!(" WHERE ({f})"));
     }
     let mut order: Vec<String> = Vec::new();
     if let Some((col, dir)) = &req.sort {
-        let dir = match dir {
-            SortDir::Asc => "ASC",
-            SortDir::Desc => "DESC",
-        };
-        order.push(format!("{} {dir} NULLS LAST", quote_ident(col)));
+        order.push(d.order_nulls_last(col, *dir));
     }
     if let Some(key) = row_key {
         for k in key {
             if req.sort.as_ref().is_some_and(|(c, _)| c == k) {
                 continue;
             }
-            order.push(format!("{} ASC", quote_ident(k)));
+            order.push(format!("{} ASC", d.quote_ident(k)));
         }
     }
     if !order.is_empty() {
@@ -91,7 +87,7 @@ pub fn load_page(
     req: PageRequest,
 ) -> impl Future<Output = Result<Page>> + Send + 'static {
     let session = session.clone();
-    let built = build_select(&req, rel.row_key.as_deref(), true);
+    let built = build_select(&req, rel.row_key.as_deref(), true, session.dialect());
     let rel = rel.clone();
     runtime::spawn(async move {
         let sql = built?;
@@ -104,7 +100,8 @@ pub fn load_page(
             .into_iter()
             .map(|mut c| {
                 if let Some(info) = rel.column(&c.name) {
-                    c.type_oid = Some(info.type_oid);
+                    // 0: an engine without type ids; the name decides.
+                    c.type_oid = (info.type_oid != 0).then_some(info.type_oid);
                     c.type_name = Some(info.type_name.clone());
                 }
                 c
@@ -126,9 +123,10 @@ pub fn count_rows(
     filter: Option<String>,
 ) -> impl Future<Output = Result<u64>> + Send + 'static {
     let session = session.clone();
-    let mut sql = format!("SELECT count(*) FROM {}", quote_qualified(schema, table));
+    let d = session.dialect();
+    let mut sql = format!("SELECT count(*) FROM {}", d.qualified(schema, table));
     let filter_result = match normalized_filter(&filter) {
-        Some(f) => validate_filter(f).map(|_| sql.push_str(&format!(" WHERE ({f})"))),
+        Some(f) => validate_filter(f, d).map(|_| sql.push_str(&format!(" WHERE ({f})"))),
         None => Ok(()),
     };
     runtime::spawn(async move {
@@ -143,26 +141,29 @@ pub fn count_rows(
 }
 
 /// One condition for "Filter by this value" / "Exclude this value".
-pub fn quick_filter(column: &str, value: &CellValue, exclude: bool) -> String {
-    let col = quote_ident(column);
+pub fn quick_filter(column: &str, value: &CellValue, exclude: bool, d: Dialect) -> String {
+    let col = d.quote_ident(column);
     match (value, exclude) {
         (CellValue::Null, false) => format!("{col} IS NULL"),
         (CellValue::Null, true) => format!("{col} IS NOT NULL"),
-        (CellValue::Text(v), false) => format!("{col} = {}", quote_literal(v)),
-        (CellValue::Text(v), true) => format!("{col} <> {}", quote_literal(v)),
+        (CellValue::Text(v), false) => format!("{col} = {}", d.quote_literal(v)),
+        (CellValue::Text(v), true) => format!("{col} <> {}", d.quote_literal(v)),
     }
 }
 
 /// The filter that finds the row a foreign key points at: `"a" = '1' AND "b" = 'x'`.
 /// `None` when a value is NULL (the key then points nowhere) or the lists differ in length.
-pub fn key_filter(columns: &[String], values: &[Option<String>]) -> Option<String> {
+pub fn key_filter(columns: &[String], values: &[Option<String>], d: Dialect) -> Option<String> {
     if columns.is_empty() || columns.len() != values.len() {
         return None;
     }
     let parts: Option<Vec<String>> = columns
         .iter()
         .zip(values)
-        .map(|(c, v)| v.as_ref().map(|v| quick_filter(c, &CellValue::Text(v.clone()), false)))
+        .map(|(c, v)| {
+            v.as_ref()
+                .map(|v| quick_filter(c, &CellValue::Text(v.clone()), false, d))
+        })
         .collect();
     parts.map(|p| p.join(" AND "))
 }
@@ -194,7 +195,7 @@ mod tests {
     fn select_shapes() {
         let key = vec!["id".to_string()];
         assert_eq!(
-            build_select(&req(), Some(&key), true).unwrap(),
+            build_select(&req(), Some(&key), true, Dialect::Postgres).unwrap(),
             "SELECT * FROM \"demo\".\"Weird Name\" ORDER BY \"id\" ASC LIMIT 501 OFFSET 0"
         );
         let mut r = req();
@@ -203,20 +204,35 @@ mod tests {
         r.page = 2;
         r.page_size = 100;
         assert_eq!(
-            build_select(&r, Some(&key), true).unwrap(),
+            build_select(&r, Some(&key), true, Dialect::Postgres).unwrap(),
             "SELECT * FROM \"demo\".\"Weird Name\" WHERE (a > 1) ORDER BY \"select\" DESC NULLS LAST, \"id\" ASC LIMIT 101 OFFSET 200"
         );
         assert_eq!(
-            build_select(&req(), None, false).unwrap(),
+            build_select(&req(), None, false, Dialect::Postgres).unwrap(),
             "SELECT * FROM \"demo\".\"Weird Name\""
         );
         // sorting by the key column does not repeat it
         let mut r = req();
         r.sort = Some(("id".into(), SortDir::Asc));
         assert!(
-            build_select(&r, Some(&key), false)
+            build_select(&r, Some(&key), false, Dialect::Postgres)
                 .unwrap()
                 .ends_with("ORDER BY \"id\" ASC NULLS LAST")
+        );
+    }
+
+    #[test]
+    fn other_dialects() {
+        let mut r = req();
+        r.sort = Some(("created".into(), SortDir::Desc));
+        let key = vec!["id".to_string()];
+        assert_eq!(
+            build_select(&r, Some(&key), true, Dialect::MySql).unwrap(),
+            "SELECT * FROM `demo`.`Weird Name` ORDER BY `created` IS NULL, `created` DESC, `id` ASC LIMIT 501 OFFSET 0"
+        );
+        assert_eq!(
+            quick_filter("name", &CellValue::Text("a\\b".into()), false, Dialect::Sqlite),
+            "\"name\" = 'a\\b'"
         );
     }
 
@@ -224,36 +240,42 @@ mod tests {
     fn rejects_second_statement() {
         let mut r = req();
         r.filter = Some("1=1; drop table x".into());
-        assert!(build_select(&r, None, true).is_err());
+        assert!(build_select(&r, None, true, Dialect::Postgres).is_err());
         r.filter = Some("a = 1;".into());
-        assert!(build_select(&r, None, true).is_err());
+        assert!(build_select(&r, None, true, Dialect::Postgres).is_err());
         r.filter = Some("a = ';'".into());
-        assert!(build_select(&r, None, true).is_ok());
+        assert!(build_select(&r, None, true, Dialect::Postgres).is_ok());
     }
 
     #[test]
     fn key_filters() {
         let cols = vec!["region".to_string(), "code".to_string()];
         assert_eq!(
-            key_filter(&cols, &[Some("eu".into()), Some("1".into())]).as_deref(),
+            key_filter(&cols, &[Some("eu".into()), Some("1".into())], Dialect::Postgres).as_deref(),
             Some("\"region\" = 'eu' AND \"code\" = '1'")
         );
-        assert_eq!(key_filter(&cols, &[Some("eu".into()), None]), None);
-        assert_eq!(key_filter(&cols, &[Some("eu".into())]), None);
+        assert_eq!(key_filter(&cols, &[Some("eu".into()), None], Dialect::Postgres), None);
+        assert_eq!(key_filter(&cols, &[Some("eu".into())], Dialect::Postgres), None);
     }
 
     #[test]
     fn quick_filters() {
         assert_eq!(
-            quick_filter("name", &CellValue::Text("O'Brien".into()), false),
+            quick_filter("name", &CellValue::Text("O'Brien".into()), false, Dialect::Postgres),
             "\"name\" = 'O''Brien'"
         );
         assert_eq!(
-            quick_filter("name", &CellValue::Text("a\\b".into()), true),
+            quick_filter("name", &CellValue::Text("a\\b".into()), true, Dialect::Postgres),
             "\"name\" <> E'a\\\\b'"
         );
-        assert_eq!(quick_filter("x", &CellValue::Null, false), "\"x\" IS NULL");
-        assert_eq!(quick_filter("x", &CellValue::Null, true), "\"x\" IS NOT NULL");
+        assert_eq!(
+            quick_filter("x", &CellValue::Null, false, Dialect::Postgres),
+            "\"x\" IS NULL"
+        );
+        assert_eq!(
+            quick_filter("x", &CellValue::Null, true, Dialect::Postgres),
+            "\"x\" IS NOT NULL"
+        );
         assert_eq!(append_filter(None, "\"x\" IS NULL"), "\"x\" IS NULL");
         assert_eq!(append_filter(Some("  "), "c"), "c");
         assert_eq!(

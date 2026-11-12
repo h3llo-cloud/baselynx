@@ -1,7 +1,7 @@
 //! "Copy row as": one row as an INSERT, a JSON object or tab-separated text.
 //! Pure, no UI.
 
-use baselynx_core::sql::{quote_ident, quote_literal, quote_qualified};
+use baselynx_core::sql::Dialect;
 
 /// A column of the row: name, whether it holds numbers or booleans, and its value.
 pub struct Cell<'a> {
@@ -11,18 +11,18 @@ pub struct Cell<'a> {
     pub value: Option<&'a str>,
 }
 
-pub fn insert(schema: &str, table: &str, cells: &[Cell]) -> String {
-    let names: Vec<String> = cells.iter().map(|c| quote_ident(c.name)).collect();
+pub fn insert(schema: &str, table: &str, cells: &[Cell], d: Dialect) -> String {
+    let names: Vec<String> = cells.iter().map(|c| d.quote_ident(c.name)).collect();
     let values: Vec<String> = cells
         .iter()
         .map(|c| match c.value {
             None => "NULL".into(),
-            Some(v) => quote_literal(v),
+            Some(v) => d.quote_literal(v),
         })
         .collect();
     format!(
         "INSERT INTO {} ({}) VALUES ({});",
-        quote_qualified(schema, table),
+        d.qualified(schema, table),
         names.join(", "),
         values.join(", ")
     )
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn formats() {
         assert_eq!(
-            insert("demo", "customers", &cells()),
+            insert("demo", "customers", &cells(), Dialect::Postgres),
             "INSERT INTO \"demo\".\"customers\" (\"id\", \"name\", \"active\", \"note\") VALUES ('42', 'O''Brien\tjr', 't', NULL);"
         );
         let j: serde_json::Value = serde_json::from_str(&json(&cells())).unwrap();

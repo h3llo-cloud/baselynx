@@ -25,8 +25,6 @@ use crate::ui::tokens;
 
 /// Characters shown in a cell; the editor and the preview strip show the full value.
 pub const CELL_CHARS: usize = 200;
-const NUMERIC_OIDS: [u32; 8] = [20, 21, 23, 26, 700, 701, 790, 1700];
-const BOOL_OID: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridMode {
@@ -297,11 +295,11 @@ impl GridDelegate {
                         .unwrap_or_default();
                     GridColumn {
                         name: m.name.clone(),
-                        numeric: m.type_oid.is_some_and(|o| NUMERIC_OIDS.contains(&o)),
+                        numeric: m.is_numeric(),
                         key: rel.is_some_and(|r| r.is_key_column(&m.name)),
                         writable: info.is_some_and(|c| c.writable()),
                         has_default: info.is_some_and(|c| c.has_default),
-                        boolean: m.type_oid == Some(BOOL_OID),
+                        boolean: m.is_boolean(),
                         fk: rel.is_some_and(|r| r.foreign_key_of(&m.name).is_some()),
                         width: measure_width(&m.name, &type_label, &rows, i),
                         type_label,

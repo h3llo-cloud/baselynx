@@ -7,9 +7,10 @@ use tokio_postgres::types::Type;
 
 use crate::catalog::RelationInfo;
 use crate::error::{ChangeIndex, CoreError, Result};
+use crate::model::Engine;
 use crate::runtime;
 use crate::session::Session;
-use crate::sql::{quote_ident, quote_literal, quote_qualified};
+use crate::sql::{Dialect, quote_literal};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CellValue {
@@ -93,13 +94,15 @@ pub struct CommitReport {
     pub inserted: usize,
 }
 
-/// One statement to run: SQL with `$n` text parameters.
-struct Planned {
-    sql: String,
-    params: Vec<Option<String>>,
+/// One statement to run, with its parameters as text, and the same statement with the
+/// values written in for the review dialog.
+pub(crate) struct Planned {
+    pub sql: String,
+    pub preview: String,
+    pub params: Vec<Option<String>>,
     /// UPDATE and DELETE must affect exactly one row.
-    expect_one: bool,
-    key_label: Option<String>,
+    pub expect_one: bool,
+    pub key_label: Option<String>,
 }
 
 fn type_of<'a>(rel: &'a RelationInfo, column: &str) -> Result<&'a str> {
@@ -115,25 +118,42 @@ fn key_label(key: &[(String, String)]) -> String {
         .join(", ")
 }
 
-fn plan(rel: &RelationInfo, changes: &ChangeSet) -> Result<Vec<Planned>> {
-    let target = quote_qualified(&rel.schema, &rel.name);
+/// One value: the placeholder for the statement and the literal for the preview. Postgres
+/// sends text and casts it to the column's type; MySQL and SQLite convert text parameters
+/// themselves.
+fn bind(d: Dialect, params: &mut Vec<Option<String>>, value: Option<&str>, type_name: &str) -> (String, String) {
+    params.push(value.map(str::to_string));
+    let n = params.len();
+    match d {
+        Dialect::Postgres => (
+            format!("${n}::text::{type_name}"),
+            match value {
+                Some(v) => format!("{}::{type_name}", quote_literal(v)),
+                None => format!("NULL::{type_name}"),
+            },
+        ),
+        Dialect::MySql | Dialect::Sqlite => (
+            d.placeholder(n),
+            value.map_or_else(|| "NULL".to_string(), |v| d.quote_literal(v)),
+        ),
+    }
+}
+
+pub(crate) fn plan(rel: &RelationInfo, changes: &ChangeSet, d: Dialect) -> Result<Vec<Planned>> {
+    let target = d.qualified(&rel.schema, &rel.name);
     let mut out = Vec::with_capacity(changes.len());
-    let where_key = |key: &[(String, String)], params: &mut Vec<Option<String>>| -> Result<String> {
-        let mut parts = Vec::with_capacity(key.len());
+    let where_key = |key: &[(String, String)], params: &mut Vec<Option<String>>| -> Result<(String, String)> {
+        let (mut sql, mut prev) = (Vec::with_capacity(key.len()), Vec::with_capacity(key.len()));
         for (col, val) in key {
-            params.push(Some(val.clone()));
-            parts.push(format!(
-                "{} = ${}::text::{}",
-                quote_ident(col),
-                params.len(),
-                type_of(rel, col)?
-            ));
+            let (ph, lit) = bind(d, params, Some(val), type_of(rel, col)?);
+            sql.push(format!("{} = {ph}", d.quote_ident(col)));
+            prev.push(format!("{} = {lit}", d.quote_ident(col)));
         }
-        Ok(parts.join(" AND "))
+        Ok((sql.join(" AND "), prev.join(" AND ")))
     };
     for u in &changes.updates {
         let mut params = Vec::new();
-        let mut sets = Vec::new();
+        let (mut sets, mut sets_prev) = (Vec::new(), Vec::new());
         for (col, val) in &u.set {
             let info = rel
                 .column(col)
@@ -141,33 +161,31 @@ fn plan(rel: &RelationInfo, changes: &ChangeSet) -> Result<Vec<Planned>> {
             if !info.writable() {
                 return Err(CoreError::Invalid(format!("column {col} cannot be written")));
             }
-            params.push(val.as_option().map(str::to_string));
-            sets.push(format!(
-                "{} = ${}::text::{}",
-                quote_ident(col),
-                params.len(),
-                info.type_name
-            ));
+            let (ph, lit) = bind(d, &mut params, val.as_option(), &info.type_name);
+            sets.push(format!("{} = {ph}", d.quote_ident(col)));
+            sets_prev.push(format!("{} = {lit}", d.quote_ident(col)));
         }
         if sets.is_empty() {
             continue;
         }
-        let w = where_key(&u.key, &mut params)?;
+        let (w, w_prev) = where_key(&u.key, &mut params)?;
         out.push(Planned {
             sql: format!("UPDATE {target} SET {} WHERE {w}", sets.join(", ")),
+            preview: format!("UPDATE {target} SET {} WHERE {w_prev}", sets_prev.join(", ")),
             params,
             expect_one: true,
             key_label: Some(key_label(&u.key)),
         });
     }
-    for d in &changes.deletes {
+    for del in &changes.deletes {
         let mut params = Vec::new();
-        let w = where_key(&d.key, &mut params)?;
+        let (w, w_prev) = where_key(&del.key, &mut params)?;
         out.push(Planned {
             sql: format!("DELETE FROM {target} WHERE {w}"),
+            preview: format!("DELETE FROM {target} WHERE {w_prev}"),
             params,
             expect_one: true,
-            key_label: Some(key_label(&d.key)),
+            key_label: Some(key_label(&del.key)),
         });
     }
     for ins in &changes.inserts {
@@ -177,8 +195,14 @@ fn plan(rel: &RelationInfo, changes: &ChangeSet) -> Result<Vec<Planned>> {
             .filter(|(c, _)| rel.column(c).is_some_and(|i| i.writable()))
             .collect();
         if values.is_empty() {
+            // MySQL has no DEFAULT VALUES.
+            let sql = match d {
+                Dialect::MySql => format!("INSERT INTO {target} () VALUES ()"),
+                _ => format!("INSERT INTO {target} DEFAULT VALUES"),
+            };
             out.push(Planned {
-                sql: format!("INSERT INTO {target} DEFAULT VALUES"),
+                preview: sql.clone(),
+                sql,
                 params: Vec::new(),
                 expect_one: false,
                 key_label: None,
@@ -186,18 +210,23 @@ fn plan(rel: &RelationInfo, changes: &ChangeSet) -> Result<Vec<Planned>> {
             continue;
         }
         let mut params = Vec::new();
-        let mut cols = Vec::new();
-        let mut vals = Vec::new();
+        let (mut cols, mut vals, mut vals_prev) = (Vec::new(), Vec::new(), Vec::new());
         for (col, val) in values {
-            params.push(val.as_option().map(str::to_string));
-            cols.push(quote_ident(col));
-            vals.push(format!("${}::text::{}", params.len(), type_of(rel, col)?));
+            let (ph, lit) = bind(d, &mut params, val.as_option(), type_of(rel, col)?);
+            cols.push(d.quote_ident(col));
+            vals.push(ph);
+            vals_prev.push(lit);
         }
         out.push(Planned {
             sql: format!(
                 "INSERT INTO {target} ({}) VALUES ({})",
                 cols.join(", "),
                 vals.join(", ")
+            ),
+            preview: format!(
+                "INSERT INTO {target} ({}) VALUES ({})",
+                cols.join(", "),
+                vals_prev.join(", ")
             ),
             params,
             expect_one: false,
@@ -208,26 +237,8 @@ fn plan(rel: &RelationInfo, changes: &ChangeSet) -> Result<Vec<Planned>> {
 }
 
 /// The statements with literal values, for the review dialog. Never executed.
-pub fn preview(rel: &RelationInfo, changes: &ChangeSet) -> Result<Vec<String>> {
-    Ok(plan(rel, changes)?
-        .into_iter()
-        .map(|p| inline_params(&p.sql, &p.params))
-        .collect())
-}
-
-/// Replaces `$n::text::` with the literal. Only used on SQL this module generated.
-fn inline_params(sql: &str, params: &[Option<String>]) -> String {
-    let mut out = sql.to_string();
-    // Replace from the highest index so `$1` does not match the start of `$10`.
-    for (i, p) in params.iter().enumerate().rev() {
-        let needle = format!("${}::text::", i + 1);
-        let lit = match p {
-            Some(v) => format!("{}::", quote_literal(v)),
-            None => "NULL::".to_string(),
-        };
-        out = out.replacen(&needle, &lit, 1);
-    }
-    out
+pub fn preview(rel: &RelationInfo, changes: &ChangeSet, dialect: Dialect) -> Result<Vec<String>> {
+    Ok(plan(rel, changes, dialect)?.into_iter().map(|p| p.preview).collect())
 }
 
 async fn run_typed(
@@ -249,9 +260,17 @@ pub fn commit(
     changes: ChangeSet,
 ) -> impl Future<Output = Result<CommitReport>> + Send + 'static {
     let session = session.clone();
-    let planned = plan(rel, &changes);
+    let planned = plan(rel, &changes, session.dialect());
+    let report = CommitReport {
+        updated: changes.updates.iter().filter(|u| !u.set.is_empty()).count(),
+        deleted: changes.deletes.len(),
+        inserted: changes.inserts.len(),
+    };
     runtime::spawn(async move {
         let planned = planned?;
+        if session.engine() == Engine::Sqlite {
+            return crate::engine::sqlite::commit(&session, planned, report).await;
+        }
         let client = session.client();
         client.batch_execute("BEGIN").await?;
         for (i, p) in planned.iter().enumerate() {
@@ -277,11 +296,7 @@ pub fn commit(
             let _ = client.batch_execute("ROLLBACK").await;
             return Err(e.into());
         }
-        Ok(CommitReport {
-            updated: changes.updates.iter().filter(|u| !u.set.is_empty()).count(),
-            deleted: changes.deletes.len(),
-            inserted: changes.inserts.len(),
-        })
+        Ok(report)
     })
 }
 
@@ -345,7 +360,7 @@ mod tests {
                 RowInsert { values: vec![] },
             ],
         };
-        let p = preview(&rel(), &changes).unwrap();
+        let p = preview(&rel(), &changes, Dialect::Postgres).unwrap();
         assert_eq!(
             p,
             vec![
@@ -367,20 +382,42 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(preview(&rel(), &changes).is_err());
+        assert!(preview(&rel(), &changes, Dialect::Postgres).is_err());
     }
 
     #[test]
-    fn inline_many_params() {
-        let params: Vec<Option<String>> = (1..=11).map(|i| Some(i.to_string())).collect();
-        let sql = (1..=11)
-            .map(|i| format!("${i}::text::int"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let out = inline_params(&sql, &params);
+    fn other_engines() {
+        let changes = ChangeSet {
+            updates: vec![RowUpdate {
+                key: vec![("id".into(), "7".into())],
+                set: vec![("name".into(), CellValue::Text(r"a\b".into()))],
+            }],
+            inserts: vec![RowInsert { values: vec![] }],
+            ..Default::default()
+        };
+        let my = plan(&rel(), &changes, Dialect::MySql).unwrap();
+        assert_eq!(my[0].sql, "UPDATE `demo`.`t` SET `name` = ? WHERE `id` = ?");
+        // MySQL reads backslashes as escapes, so the preview doubles them.
+        assert_eq!(my[0].preview, r"UPDATE `demo`.`t` SET `name` = 'a\\b' WHERE `id` = '7'");
+        assert_eq!(my[0].params, vec![Some(r"a\b".to_string()), Some("7".to_string())]);
+        assert_eq!(my[1].sql, "INSERT INTO `demo`.`t` () VALUES ()");
+        let lite = plan(&rel(), &changes, Dialect::Sqlite).unwrap();
+        assert_eq!(lite[0].sql, "UPDATE \"demo\".\"t\" SET \"name\" = ? WHERE \"id\" = ?");
         assert_eq!(
-            out,
-            (1..=11).map(|i| format!("'{i}'::int")).collect::<Vec<_>>().join(",")
+            lite[0].preview,
+            r#"UPDATE "demo"."t" SET "name" = 'a\b' WHERE "id" = '7'"#
         );
+        assert_eq!(lite[1].sql, "INSERT INTO \"demo\".\"t\" DEFAULT VALUES");
+        // Postgres numbers its parameters; past nine they stay apart.
+        let many = ChangeSet {
+            inserts: vec![RowInsert {
+                values: (0..11)
+                    .map(|_| ("name".to_string(), CellValue::Text("x".into())))
+                    .collect(),
+            }],
+            ..Default::default()
+        };
+        let pg = plan(&rel(), &many, Dialect::Postgres).unwrap();
+        assert!(pg[0].sql.contains("$10::text::text, $11::text::text"), "{}", pg[0].sql);
     }
 }

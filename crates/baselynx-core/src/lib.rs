@@ -7,6 +7,7 @@ pub mod backup;
 pub mod catalog;
 pub mod config;
 pub mod edit;
+pub mod engine;
 pub mod error;
 pub mod exec;
 pub mod export;

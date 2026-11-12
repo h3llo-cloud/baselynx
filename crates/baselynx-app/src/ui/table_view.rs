@@ -732,7 +732,7 @@ impl TableView {
             Nav::Page(p) => self.page = p,
             Nav::Filter(f) => {
                 if let Some(f) = &f
-                    && let Err(e) = table::validate_filter(f)
+                    && let Err(e) = table::validate_filter(f, self.conn.dialect())
                 {
                     self.filter_error = Some(e.to_string().into());
                     cx.notify();
@@ -1376,7 +1376,7 @@ impl TableView {
 
     /// Puts `"column" = ` at the end of the filter and the caret after it.
     fn start_filter_on(&mut self, column: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let cond = format!("{} = ", baselynx_core::sql::quote_ident(column));
+        let cond = format!("{} = ", self.conn.dialect().quote_ident(column));
         let current = self.filter_input.read(cx).value().trim().to_string();
         let text = if current.is_empty() {
             cond
@@ -1441,7 +1441,7 @@ impl TableView {
         let d = self.grid.read(cx).delegate();
         let cells = d.row_cells(row);
         let text = match format {
-            RowFormat::Insert => crate::row_text::insert(&self.schema, &self.table, &cells),
+            RowFormat::Insert => crate::row_text::insert(&self.schema, &self.table, &cells, self.conn.dialect()),
             RowFormat::Json => crate::row_text::json(&cells),
             RowFormat::Tsv => crate::row_text::tsv(&cells),
         };
@@ -1471,7 +1471,7 @@ impl TableView {
             return;
         };
         let value = CellValue::from_option(d.model.loaded_value(r, c).map(String::from));
-        let cond = table::quick_filter(&name, &value, exclude);
+        let cond = table::quick_filter(&name, &value, exclude, self.conn.dialect());
         let filter = table::append_filter(self.filter.as_deref(), &cond);
         self.filter_input
             .update(cx, |i, cx| i.set_value(filter.clone(), window, cx));
@@ -1493,7 +1493,7 @@ impl TableView {
                 return;
             }
         };
-        let statements = match edit::preview(&rel, &changes) {
+        let statements = match edit::preview(&rel, &changes, self.conn.dialect()) {
             Ok(s) => s,
             Err(e) => {
                 window.push_notification(Notification::error(e.to_string()).autohide(false), cx);
@@ -1604,7 +1604,7 @@ impl TableView {
                     let info = rel.as_ref().and_then(|r| r.column(&c.name));
                     exec::ColumnMeta {
                         name: c.name.clone(),
-                        type_oid: info.map(|i| i.type_oid),
+                        type_oid: info.and_then(|i| (i.type_oid != 0).then_some(i.type_oid)),
                         type_name: info.map(|i| i.type_name.clone()),
                     }
                 })
@@ -1618,7 +1618,9 @@ impl TableView {
                     let (Some(target), Some(rel)) = (target.clone(), rel.clone()) else {
                         return;
                     };
-                    let Ok(sql) = table::build_select(&req, rel.row_key.as_deref(), false) else {
+                    let Ok(sql) =
+                        table::build_select(&req, rel.row_key.as_deref(), false, target.config.engine.dialect())
+                    else {
                         return;
                     };
                     ExportSource::Query {

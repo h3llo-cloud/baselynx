@@ -538,12 +538,18 @@ impl Render for RestoreDialog {
                     cx.notify();
                 }))
             };
+            let sqlite = self.target.engine == baselynx_core::model::Engine::Sqlite;
+            let (dump_label, sql_label) = if sqlite {
+                ("the file copy", "the SQL files")
+            } else {
+                ("the dump (pg_restore)", "the SQL files (psql)")
+            };
             body = body.child(
                 h_flex()
                     .gap_2()
                     .child("Restore from")
-                    .child(pick("fmt-dump", BackupFormat::Dump, "the dump (pg_restore)", cx))
-                    .child(pick("fmt-sql", BackupFormat::Sql, "the SQL files (psql)", cx)),
+                    .child(pick("fmt-dump", BackupFormat::Dump, dump_label, cx))
+                    .child(pick("fmt-sql", BackupFormat::Sql, sql_label, cx)),
             );
         }
 

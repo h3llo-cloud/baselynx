@@ -747,8 +747,9 @@ impl Workspace {
         if matches!(rt.status, ConnStatus::Connected { .. } | ConnStatus::Connecting) {
             return;
         }
-        // Kubernetes databases read their password from a secret when connecting.
-        if config.kube.as_ref().is_some_and(|k| k.credentials.secret.is_some()) {
+        // Kubernetes databases read their password from a secret when connecting; a SQLite
+        // file has none.
+        if config.kube.as_ref().is_some_and(|k| k.credentials.secret.is_some()) || config.engine.is_file() {
             self.connect_with(id, interactive, window, cx);
             return;
         }
@@ -789,10 +790,7 @@ impl Workspace {
         let weak = cx.weak_entity();
         open_text_prompt(
             format!("Password for {}", config.name),
-            Some(format!(
-                "{}@{}:{}/{}",
-                config.user, config.host, config.port, config.database
-            )),
+            Some(config.describe()),
             String::new(),
             true,
             "Connect",
@@ -834,13 +832,22 @@ impl Workspace {
             }
             .await;
             let _ = this.update_in(cx, |this, window, cx| {
+                // The schema a connection works in opens by itself: `public`, SQLite's `main`,
+                // or the MySQL database the connection names.
+                let home = this.project.connection(id).map(|c| match c.engine {
+                    baselynx_core::model::Engine::Postgres => "public".to_string(),
+                    baselynx_core::model::Engine::Sqlite => "main".to_string(),
+                    baselynx_core::model::Engine::Mysql => c.database.clone(),
+                });
                 let Some(rt) = this.conns.get_mut(&id) else { return };
                 match result {
                     Ok((s, schemas, all)) => {
                         rt.status = ConnStatus::Connected { session: s };
                         rt.expanded |= expand;
-                        if schemas.iter().any(|x| x.name == "public") {
-                            rt.expanded_schemas.insert("public".into());
+                        if let Some(home) = home
+                            && schemas.iter().any(|x| x.name == home)
+                        {
+                            rt.expanded_schemas.insert(home);
                         }
                         rt.schemas = schemas;
                         rt.all_relations = Arc::new(all);
@@ -853,7 +860,7 @@ impl Workspace {
                         this.push_targets(id, window, cx);
                     }
                     Err(e) => {
-                        if e.sqlstate() == Some("28P01") {
+                        if e.is_auth_failure() {
                             rt.password = None;
                         }
                         rt.status = ConnStatus::Failed(e.to_string());
@@ -1179,11 +1186,7 @@ impl Workspace {
             .connection(conn)
             .cloned()
             .unwrap_or_else(|| ConnectionConfig::new("?"));
-        let label = crate::app_state::ConnLabel {
-            id: config.id,
-            name: config.name.clone(),
-            color: config.color,
-        };
+        let label = crate::app_state::ConnLabel::of(&config);
         let target = self.target(conn);
         let tab = match st {
             TabState::Console { id, title, text, .. } => {
@@ -1371,16 +1374,7 @@ impl Workspace {
                         connected && rt.is_some_and(|r| r.all_relations.iter().any(|x| x.schema == s && x.name == t))
                     }
                 };
-                has.then(|| {
-                    (
-                        crate::app_state::ConnLabel {
-                            id: c.id,
-                            name: c.name.clone(),
-                            color: c.color,
-                        },
-                        connected,
-                    )
-                })
+                has.then(|| (crate::app_state::ConnLabel::of(c), connected))
             })
             .collect()
     }
@@ -1448,11 +1442,7 @@ impl Workspace {
         let Some(config) = self.project.connection(to).cloned() else {
             return;
         };
-        let label = crate::app_state::ConnLabel {
-            id: config.id,
-            name: config.name.clone(),
-            color: config.color,
-        };
+        let label = crate::app_state::ConnLabel::of(&config);
         let target = self.target(to);
         v.update(cx, |v, cx| v.move_to(label, target, cx));
         if self.target(to).is_none() {
@@ -1855,10 +1845,12 @@ impl Workspace {
         match item {
             PaletteItem::Relation { conn, schema, name, .. } => {
                 if secondary {
-                    let sql = format!(
-                        "SELECT * FROM {} LIMIT 100;",
-                        baselynx_core::sql::quote_qualified(&schema, &name)
-                    );
+                    let d = self
+                        .project
+                        .connection(conn)
+                        .map(|c| c.engine.dialect())
+                        .unwrap_or_default();
+                    let sql = format!("SELECT * FROM {} LIMIT 100;", d.qualified(&schema, &name));
                     self.open_console(conn, Some(sql), window, cx);
                 } else {
                     self.open_table(conn, &schema, &name, window, cx);
@@ -1873,7 +1865,12 @@ impl Workspace {
                 ..
             } => {
                 let values: Vec<Option<String>> = values.into_iter().map(Some).collect();
-                let filter = baselynx_core::table::key_filter(&key, &values);
+                let d = self
+                    .project
+                    .connection(conn)
+                    .map(|c| c.engine.dialect())
+                    .unwrap_or_default();
+                let filter = baselynx_core::table::key_filter(&key, &values, d);
                 let to = Loc {
                     conn,
                     schema,
@@ -2148,7 +2145,9 @@ impl Workspace {
         let version = tab
             .and_then(|t| self.conns.get(&t.connection(cx)))
             .and_then(|rt| match &rt.status {
-                ConnStatus::Connected { session } => Some(format!("PostgreSQL {}", session.server_version())),
+                ConnStatus::Connected { session } => {
+                    Some(format!("{} {}", session.engine().label(), session.server_version()))
+                }
                 _ => None,
             });
         let sep = || div().text_color(tokens::secondary_text(cx)).child("·");

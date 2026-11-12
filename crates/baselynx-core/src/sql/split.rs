@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use super::Dialect;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
     pub text: String,
@@ -11,13 +13,29 @@ pub struct Statement {
 }
 
 /// Splits on semicolons outside strings, quoted identifiers, dollar quotes and comments.
-/// Statements with no code (empty or only comments) are dropped.
+/// Statements with no code (empty or only comments) are dropped. Postgres rules; see
+/// [`split_in`] for other engines.
 pub fn split(sql: &str) -> Vec<Statement> {
+    split_in(sql, Dialect::Postgres)
+}
+
+/// [`split`] with an engine's lexical rules: MySQL's backticks, `#` comments, backslash
+/// escapes and `DELIMITER` lines; SQLite's `[brackets]` and backticks.
+pub fn split_in(sql: &str, dialect: Dialect) -> Vec<Statement> {
     let mut out = Vec::new();
-    let mut scan = Scanner::new(sql);
+    let mut scan = Scanner::new(sql, dialect);
     let mut first: Option<usize> = None;
     let mut last_end = 0usize;
-    while let Some(tok) = scan.next_token() {
+    loop {
+        // `DELIMITER //` (a mysql client command) between statements changes the separator.
+        if dialect == Dialect::MySql
+            && first.is_none()
+            && let Some(delim) = scan.delimiter_line()
+        {
+            scan.delimiter = delim;
+            continue;
+        }
+        let Some(tok) = scan.next_token() else { break };
         match tok {
             Token::Semicolon => {
                 if let Some(start) = first.take() {
@@ -45,7 +63,11 @@ pub fn split(sql: &str) -> Vec<Statement> {
 
 /// True when the text has a semicolon outside strings, identifiers and comments.
 pub fn has_top_level_semicolon(sql: &str) -> bool {
-    let mut scan = Scanner::new(sql);
+    has_top_level_semicolon_in(sql, Dialect::Postgres)
+}
+
+pub fn has_top_level_semicolon_in(sql: &str, dialect: Dialect) -> bool {
+    let mut scan = Scanner::new(sql, dialect);
     while let Some(tok) = scan.next_token() {
         if tok == Token::Semicolon {
             return true;
@@ -57,7 +79,11 @@ pub fn has_top_level_semicolon(sql: &str) -> bool {
 /// The statement whose range contains `offset`, or the nearest one before it (the caret
 /// is in trailing whitespace), or the first one when the caret is before all statements.
 pub fn statement_at(sql: &str, offset: usize) -> Option<Statement> {
-    let stmts = split(sql);
+    statement_at_in(sql, offset, Dialect::Postgres)
+}
+
+pub fn statement_at_in(sql: &str, offset: usize, dialect: Dialect) -> Option<Statement> {
+    let stmts = split_in(sql, dialect);
     let idx = stmts.iter().rposition(|s| s.range.start <= offset).unwrap_or(0);
     stmts.into_iter().nth(idx)
 }
@@ -73,15 +99,36 @@ struct Scanner<'a> {
     src: &'a str,
     bytes: &'a [u8],
     pos: usize,
+    dialect: Dialect,
+    /// What ends a statement: `;`, or what a MySQL `DELIMITER` line set.
+    delimiter: String,
 }
 
 impl<'a> Scanner<'a> {
-    fn new(src: &'a str) -> Self {
+    fn new(src: &'a str, dialect: Dialect) -> Self {
         Self {
             src,
             bytes: src.as_bytes(),
             pos: 0,
+            dialect,
+            delimiter: ";".into(),
         }
+    }
+
+    /// At `DELIMITER <text>` (any case), consumes the line and returns the new delimiter.
+    fn delimiter_line(&mut self) -> Option<String> {
+        let rest = &self.src[self.pos..];
+        let word = rest.get(..9)?;
+        if !word.eq_ignore_ascii_case("delimiter") || !rest[9..].starts_with([' ', '\t']) {
+            return None;
+        }
+        let end = rest.find('\n').unwrap_or(rest.len());
+        let delim = rest[9..end].trim();
+        if delim.is_empty() {
+            return None;
+        }
+        self.pos += end;
+        Some(delim.to_string())
     }
 
     fn peek(&self, ahead: usize) -> Option<u8> {
@@ -99,10 +146,25 @@ impl<'a> Scanner<'a> {
     fn next_token(&mut self) -> Option<Token> {
         let b = self.peek(0)?;
         let start = self.pos;
+        if self.delimiter != ";" && self.src[start..].starts_with(self.delimiter.as_str()) {
+            self.pos += self.delimiter.len();
+            return Some(Token::Semicolon);
+        }
+        let mysql = self.dialect == Dialect::MySql;
+        let sqlite = self.dialect == Dialect::Sqlite;
         match b {
-            b';' => {
+            b';' if self.delimiter == ";" => {
                 self.pos += 1;
                 Some(Token::Semicolon)
+            }
+            b'#' if mysql => {
+                while let Some(c) = self.peek(0) {
+                    if c == b'\n' {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                Some(Token::Trivia)
             }
             b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' => {
                 self.pos += 1;
@@ -137,18 +199,37 @@ impl<'a> Scanner<'a> {
                 Some(Token::Trivia)
             }
             b'\'' => {
-                let escapes =
-                    start > 0 && matches!(self.bytes[start - 1], b'E' | b'e') && !self.prev_is_ident_char(start - 1);
+                let escapes = match self.dialect {
+                    Dialect::MySql => true,
+                    Dialect::Sqlite => false,
+                    Dialect::Postgres => {
+                        start > 0 && matches!(self.bytes[start - 1], b'E' | b'e') && !self.prev_is_ident_char(start - 1)
+                    }
+                };
                 self.pos += 1;
                 self.skip_quoted(b'\'', escapes);
                 Some(Token::Code(start..self.pos))
             }
             b'"' => {
                 self.pos += 1;
-                self.skip_quoted(b'"', false);
+                // A string in MySQL's default mode, an identifier elsewhere.
+                self.skip_quoted(b'"', mysql);
                 Some(Token::Code(start..self.pos))
             }
-            b'$' if !self.prev_is_ident_char(start) => {
+            b'`' if mysql || sqlite => {
+                self.pos += 1;
+                self.skip_quoted(b'`', false);
+                Some(Token::Code(start..self.pos))
+            }
+            b'[' if sqlite => {
+                self.pos += 1;
+                match self.src[self.pos..].find(']') {
+                    Some(i) => self.pos += i + 1,
+                    None => self.pos = self.bytes.len(),
+                }
+                Some(Token::Code(start..self.pos))
+            }
+            b'$' if self.dialect == Dialect::Postgres && !self.prev_is_ident_char(start) => {
                 if let Some(tag_len) = self.dollar_tag_len() {
                     let tag = &self.src[start..start + tag_len];
                     self.pos += tag_len;
@@ -218,6 +299,45 @@ mod tests {
 
     fn texts(sql: &str) -> Vec<String> {
         split(sql).into_iter().map(|s| s.text).collect()
+    }
+
+    fn texts_in(sql: &str, d: Dialect) -> Vec<String> {
+        split_in(sql, d).into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn mysql_rules() {
+        let d = Dialect::MySql;
+        assert_eq!(
+            texts_in(r"select 'a\';' ; select 2", d),
+            vec![r"select 'a\';'", "select 2"]
+        );
+        assert_eq!(
+            texts_in("select 1 # a; comment\n; select `x;y`", d),
+            vec!["select 1", "select `x;y`"]
+        );
+        assert_eq!(
+            texts_in("select \"a;b\"; select 2", d),
+            vec!["select \"a;b\"", "select 2"]
+        );
+        let script = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END//\nDELIMITER ;\nCALL p();";
+        assert_eq!(
+            texts_in(script, d),
+            vec!["CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END", "CALL p()"]
+        );
+        // `$` is no dollar quote in MySQL.
+        assert_eq!(texts_in("select $a$; select 2", d), vec!["select $a$", "select 2"]);
+    }
+
+    #[test]
+    fn sqlite_rules() {
+        let d = Dialect::Sqlite;
+        assert_eq!(
+            texts_in("select [a;b], `c;d`; select 2", d),
+            vec!["select [a;b], `c;d`", "select 2"]
+        );
+        // A backslash is an ordinary character in SQLite strings.
+        assert_eq!(texts_in(r"select 'a\'; select 2", d), vec![r"select 'a\'", "select 2"]);
     }
 
     #[test]

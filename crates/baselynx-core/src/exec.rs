@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::SimpleQueryMessage;
 
 use crate::error::{CoreError, Result};
+use crate::model::Engine;
 use crate::runtime;
 use crate::session::Session;
 
@@ -31,7 +32,52 @@ impl ColumnMeta {
     }
 }
 
-/// A row: every value as PostgreSQL prints it, `None` for `NULL`.
+impl ColumnMeta {
+    /// Right-aligned in the grid: a number type, by Postgres type id or by name.
+    pub fn is_numeric(&self) -> bool {
+        match self.type_oid {
+            Some(oid) => NUMERIC_OIDS.contains(&oid),
+            None => self.type_name.as_deref().is_some_and(is_numeric_type),
+        }
+    }
+
+    /// Shown as `true` / `false`: Postgres `boolean` only. MySQL `tinyint(1)` and SQLite
+    /// `BOOLEAN` hold 0 and 1 and are shown as numbers.
+    pub fn is_boolean(&self) -> bool {
+        self.type_oid == Some(BOOL_OID)
+    }
+}
+
+/// int2, int4, int8, oid, float4, float8, money, numeric.
+const NUMERIC_OIDS: [u32; 8] = [20, 21, 23, 26, 700, 701, 790, 1700];
+const BOOL_OID: u32 = 16;
+
+/// A number type by its declared name, for engines without Postgres type ids.
+pub fn is_numeric_type(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let base = n.split(['(', ' ']).next().unwrap_or(&n);
+    matches!(
+        base,
+        "int"
+            | "integer"
+            | "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "bigint"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "decimal"
+            | "numeric"
+            | "real"
+            | "float"
+            | "double"
+            | "number"
+            | "year"
+    )
+}
+
+/// A row: every value as the server prints it, `None` for `NULL`.
 pub type Row = Vec<Option<String>>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,7 +101,11 @@ pub fn execute(session: &Arc<Session>, sql: String, row_cap: Option<usize>) -> m
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY.max(2));
     let session = session.clone();
     runtime::runtime().spawn(async move {
-        if let Err(e) = run(&session, &sql, row_cap, &tx).await {
+        let result = match session.engine() {
+            Engine::Sqlite => crate::engine::sqlite::run(&session, sql, row_cap, tx.clone()).await,
+            Engine::Postgres | Engine::Mysql => run(&session, &sql, row_cap, &tx).await,
+        };
+        if let Err(e) = result {
             let _ = tx.send(Err(e)).await;
         }
     });

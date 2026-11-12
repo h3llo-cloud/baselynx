@@ -29,7 +29,7 @@ use tokio::process::Command;
 use crate::config::{BackupFormat, BackupPlan, BackupSettings, BackupSource, Keep};
 use crate::error::{CoreError, Result};
 use crate::k8s::{self, KubeTarget};
-use crate::model::{ConnectionConfig, SslMode};
+use crate::model::{ConnectionConfig, Engine, SslMode};
 use crate::runtime;
 
 const MANIFEST: &str = "manifest.json";
@@ -47,6 +47,9 @@ const SQL_FILES: [(&str, &str); 3] = [
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub format_version: u32,
+    /// The engine the backup came from; a restore only goes into the same kind.
+    #[serde(default)]
+    pub engine: Engine,
     pub baselynx_version: String,
     /// The connection's name when the backup was taken.
     pub connection: String,
@@ -560,8 +563,12 @@ pub fn status(settings: &BackupSettings, config: &ConnectionConfig) -> Status {
 
 async fn backup_inner(job: BackupJob) -> Result<BackupRun> {
     let tools = job.settings.tools.clone();
+    let engine = job.config.engine;
     let dump = pg_tool("pg_dump", tools.as_deref());
-    let pg_dump_version = tool_version(&dump).await?;
+    let pg_dump_version = match engine {
+        Engine::Sqlite => format!("SQLite {} backup API", rusqlite::version()),
+        Engine::Postgres | Engine::Mysql => tool_version(&dump).await?,
+    };
     let dir = connection_dir(&job.settings, &job.config);
     std::fs::create_dir_all(&dir).map_err(|e| CoreError::Storage(format!("{}: {e}", dir.display())))?;
     let started = Utc::now();
@@ -579,10 +586,15 @@ async fn backup_inner(job: BackupJob) -> Result<BackupRun> {
     for &replica in sources {
         let _ = std::fs::remove_dir_all(&partial);
         std::fs::create_dir_all(&partial).map_err(|e| CoreError::Storage(format!("{}: {e}", partial.display())))?;
-        match dump_into(&job, &dump, &partial, replica).await {
+        let dumped = match engine {
+            Engine::Sqlite => sqlite_dump(&job, &partial).await,
+            Engine::Postgres | Engine::Mysql => dump_into(&job, &dump, &partial, replica).await,
+        };
+        match dumped {
             Ok((files, source, database, server_version)) => {
                 let manifest = Manifest {
                     format_version: 1,
+                    engine,
                     baselynx_version: env!("CARGO_PKG_VERSION").to_string(),
                     connection: job.config.name.clone(),
                     config_key: job.config.config_key.clone(),
@@ -613,6 +625,60 @@ async fn backup_inner(job: BackupJob) -> Result<BackupRun> {
     }
     let _ = std::fs::remove_dir_all(&partial);
     Err(last_err.unwrap_or_else(|| CoreError::Invalid("no source to back up from".into())))
+}
+
+/// A SQLite file: a consistent copy (`dump`) and/or the plain SQL files.
+async fn sqlite_dump(job: &BackupJob, dir: &Path) -> Result<(Vec<ManifestFile>, String, String, String)> {
+    let src = job.config.database.clone();
+    let dir = dir.to_path_buf();
+    let mut formats = job.plan.formats.clone();
+    formats.sort();
+    formats.dedup();
+    let exclude = job.plan.exclude_tables.clone();
+    runtime::spawn_blocking(move || {
+        if !Path::new(&src).is_file() {
+            return Err(CoreError::Invalid(format!("{src}: no such file")));
+        }
+        let stem = Path::new(&src)
+            .file_stem()
+            .map(|s| file_stem(&s.to_string_lossy()))
+            .unwrap_or_else(|| "database".into());
+        let mut files = Vec::new();
+        for format in formats {
+            match format {
+                BackupFormat::Dump => {
+                    let name = format!("{stem}.sqlite");
+                    crate::engine::sqlite::copy_file(&src, &dir.join(&name))?;
+                    crate::engine::sqlite::check_file(&dir.join(&name))?;
+                    let (sha256, bytes) = sha256_file(&dir.join(&name))?;
+                    files.push(ManifestFile {
+                        name,
+                        format,
+                        bytes,
+                        sha256,
+                    });
+                }
+                BackupFormat::Sql => {
+                    crate::engine::sqlite::write_sql(&src, &dir, &exclude)?;
+                    for (name, _) in SQL_FILES {
+                        let (sha256, bytes) = sha256_file(&dir.join(name))?;
+                        files.push(ManifestFile {
+                            name: name.to_string(),
+                            format,
+                            bytes,
+                            sha256,
+                        });
+                    }
+                }
+            }
+        }
+        let database = Path::new(&src)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| src.clone());
+        Ok((files, src.clone(), database, rusqlite::version().to_string()))
+    })
+    .await
 }
 
 async fn dump_into(
@@ -800,13 +866,29 @@ async fn preflight_inner(
     );
 
     let manifest = verify_files(run_dir);
+    // The kind of database first: a backup never goes into another engine.
+    let same_engine = manifest.as_ref().map_or(true, |m| m.engine == target.engine);
+    if let Ok(m) = &manifest {
+        push(
+            "The backup comes from the same kind of database",
+            same_engine,
+            format!("{} backup, {} target", m.engine.label(), target.engine.label()),
+        );
+    }
     let mut dump_ok = true;
-    if let Ok(m) = &manifest
+    if same_engine
+        && let Ok(m) = &manifest
         && let Some(f) = m.files.iter().find(|f| f.format == BackupFormat::Dump)
-        && let Err(e) = dump_entries(&run_dir.join(&f.name), tools).await
     {
-        dump_ok = false;
-        push("The backup is complete and unchanged", false, e.to_string());
+        let file = run_dir.join(&f.name);
+        let checked = match m.engine {
+            Engine::Sqlite => runtime::spawn_blocking(move || crate::engine::sqlite::check_file(&file)).await,
+            Engine::Postgres | Engine::Mysql => dump_entries(&file, tools).await.map(|_| ()),
+        };
+        if let Err(e) = checked {
+            dump_ok = false;
+            push("The backup is complete and unchanged", false, e.to_string());
+        }
     }
     if dump_ok {
         match &manifest {
@@ -821,10 +903,12 @@ async fn preflight_inner(
     let manifest = manifest.ok();
 
     // The tool of every format the backup has: the dialog lets the user pick either.
+    // SQLite restores need no tools.
     let formats = manifest.as_ref().map(|m| m.formats.clone()).unwrap_or_default();
+    let needs_tools = target.engine != Engine::Sqlite;
     for needed in [(BackupFormat::Dump, "pg_restore"), (BackupFormat::Sql, "psql")]
         .into_iter()
-        .filter(|(f, _)| formats.contains(f))
+        .filter(|(f, _)| needs_tools && formats.contains(f))
         .map(|(_, tool)| tool)
     {
         match tool_version(&pg_tool(needed, tools)).await {
@@ -836,31 +920,51 @@ async fn preflight_inner(
     let mut database = None;
     let mut look = target.clone();
     look.read_only = false;
-    match crate::session::connect(&look, password).await {
-        Ok(s) => {
-            let client = s.client();
-            database = client
-                .query_one("SELECT current_database()::text", &[])
-                .await
-                .ok()
-                .map(|r| r.get::<_, String>(0));
-            match client.query(NOT_EMPTY_SQL, &[]).await {
-                Ok(rows) if rows.is_empty() => push("The target database is empty", true, String::new()),
-                Ok(rows) => {
-                    let mut found: Vec<String> = rows.iter().take(3).map(|r| r.get::<_, String>(0)).collect();
-                    if rows.len() > 3 {
-                        found.push("more".into());
-                    }
-                    push(
-                        "The target database is empty",
-                        false,
-                        format!("it holds {}", found.join(", ")),
-                    )
+    if target.engine == Engine::Sqlite {
+        let path = target.database.clone();
+        database = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
+        match runtime::spawn_blocking(move || crate::engine::sqlite::file_objects(&path)).await {
+            Ok(found) if found.is_empty() => push("The target database is empty", true, String::new()),
+            Ok(mut found) => {
+                if found.len() > 3 {
+                    found.truncate(3);
+                    found.push("more".into());
                 }
-                Err(e) => push("The target database is empty", false, e.to_string()),
+                push(
+                    "The target database is empty",
+                    false,
+                    format!("it holds {}", found.join(", ")),
+                )
             }
+            Err(e) => push("The target database is empty", false, format!("could not open it: {e}")),
         }
-        Err(e) => push("The target database is empty", false, format!("could not connect: {e}")),
+    } else {
+        match crate::session::connect(&look, password).await {
+            Ok(s) => {
+                let client = s.client();
+                database = client
+                    .query_one("SELECT current_database()::text", &[])
+                    .await
+                    .ok()
+                    .map(|r| r.get::<_, String>(0));
+                match client.query(NOT_EMPTY_SQL, &[]).await {
+                    Ok(rows) if rows.is_empty() => push("The target database is empty", true, String::new()),
+                    Ok(rows) => {
+                        let mut found: Vec<String> = rows.iter().take(3).map(|r| r.get::<_, String>(0)).collect();
+                        if rows.len() > 3 {
+                            found.push("more".into());
+                        }
+                        push(
+                            "The target database is empty",
+                            false,
+                            format!("it holds {}", found.join(", ")),
+                        )
+                    }
+                    Err(e) => push("The target database is empty", false, e.to_string()),
+                }
+            }
+            Err(e) => push("The target database is empty", false, format!("could not connect: {e}")),
+        }
     }
     let same_connection = manifest
         .as_ref()
@@ -912,6 +1016,25 @@ pub fn restore(
                 "this backup has no {} files",
                 format.label()
             )));
+        }
+        if target.engine == Engine::Sqlite {
+            let path = target.database.clone();
+            let copy = manifest
+                .files
+                .iter()
+                .find(|f| f.format == BackupFormat::Dump)
+                .map(|f| run_dir.join(&f.name));
+            let sql: Vec<PathBuf> = SQL_FILES.iter().map(|(n, _)| run_dir.join(n)).collect();
+            runtime::spawn_blocking(move || match format {
+                BackupFormat::Dump => crate::engine::sqlite::restore_file(&path, &copy.expect("formats lists dump")),
+                BackupFormat::Sql => crate::engine::sqlite::restore_sql(&path, &sql),
+            })
+            .await?;
+            return Ok(RestoreReport {
+                database,
+                format,
+                duration: started.elapsed(),
+            });
         }
         let mut primary = target.clone();
         primary.read_only = false;

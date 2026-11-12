@@ -71,12 +71,62 @@ impl SslMode {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().replace('_', "-").as_str() {
-            "disable" => Some(SslMode::Disable),
-            "allow" | "prefer" => Some(SslMode::Prefer),
-            "require" | "verify-ca" => Some(SslMode::Require),
-            "verify-full" => Some(SslMode::VerifyFull),
+            "disable" | "disabled" | "false" => Some(SslMode::Disable),
+            "allow" | "prefer" | "preferred" => Some(SslMode::Prefer),
+            "require" | "required" | "true" | "verify-ca" => Some(SslMode::Require),
+            "verify-full" | "verify-identity" => Some(SslMode::VerifyFull),
             _ => None,
         }
+    }
+}
+
+/// The database engine of a connection. Postgres is the default, so projects saved
+/// before other engines existed load unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    #[default]
+    Postgres,
+    /// MySQL and MariaDB.
+    Mysql,
+    /// A database file; `ConnectionConfig::database` holds its path.
+    Sqlite,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 3] = [Engine::Postgres, Engine::Mysql, Engine::Sqlite];
+
+    pub fn dialect(self) -> crate::sql::Dialect {
+        match self {
+            Engine::Postgres => crate::sql::Dialect::Postgres,
+            Engine::Mysql => crate::sql::Dialect::MySql,
+            Engine::Sqlite => crate::sql::Dialect::Sqlite,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::Postgres => "PostgreSQL",
+            Engine::Mysql => "MySQL",
+            Engine::Sqlite => "SQLite",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::Postgres => 5432,
+            Engine::Mysql => 3306,
+            Engine::Sqlite => 0,
+        }
+    }
+
+    /// A file, not a server: no host, port, user or password.
+    pub fn is_file(self) -> bool {
+        self == Engine::Sqlite
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Engine::Postgres
     }
 }
 
@@ -113,6 +163,8 @@ impl ConnectionColor {
 pub struct ConnectionConfig {
     pub id: Uuid,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Engine::is_default")]
+    pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub database: String,
@@ -143,10 +195,20 @@ pub struct ConnectionConfig {
 }
 
 impl ConnectionConfig {
+    /// Where it points, for tooltips and prompts: `user@host:port/db`, or a SQLite file.
+    pub fn describe(&self) -> String {
+        if self.engine.is_file() {
+            self.database.clone()
+        } else {
+            format!("{}@{}:{}/{}", self.user, self.host, self.port, self.database)
+        }
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
+            engine: Engine::Postgres,
             host: "localhost".into(),
             port: 5432,
             database: "postgres".into(),
@@ -209,9 +271,11 @@ impl TabState {
     }
 }
 
-/// Fields parsed from a `postgres://` or `postgresql://` URL.
+/// Fields parsed from a connection string: `postgres://`, `postgresql://`, `mysql://`,
+/// `mariadb://` or `sqlite:`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedUrl {
+    pub engine: Engine,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub database: Option<String>,
@@ -220,13 +284,25 @@ pub struct ParsedUrl {
     pub ssl_mode: Option<SslMode>,
 }
 
-/// Parses `postgres://user:pass@host:port/db?sslmode=require`. Returns `None` when the
-/// text is not such a URL.
+/// Parses `postgres://user:pass@host:port/db?sslmode=require`, the same shape with
+/// `mysql://` or `mariadb://`, and `sqlite:///path/to/file.db` (or `sqlite:file.db`).
+/// Returns `None` when the text is not such a string.
 pub fn parse_connection_url(text: &str) -> Option<ParsedUrl> {
     let text = text.trim();
-    let rest = text
+    if let Some(path) = text.strip_prefix("sqlite:") {
+        return parse_sqlite(path);
+    }
+    let (engine, rest) = match text
         .strip_prefix("postgresql://")
-        .or_else(|| text.strip_prefix("postgres://"))?;
+        .or_else(|| text.strip_prefix("postgres://"))
+    {
+        Some(r) => (Engine::Postgres, r),
+        None => (
+            Engine::Mysql,
+            text.strip_prefix("mysql://")
+                .or_else(|| text.strip_prefix("mariadb://"))?,
+        ),
+    };
     let (main, query) = match rest.split_once('?') {
         Some((m, q)) => (m, Some(q)),
         None => (rest, None),
@@ -235,7 +311,10 @@ pub fn parse_connection_url(text: &str) -> Option<ParsedUrl> {
         Some((a, p)) => (a, Some(p)),
         None => (main, None),
     };
-    let mut out = ParsedUrl::default();
+    let mut out = ParsedUrl {
+        engine,
+        ..Default::default()
+    };
     let host_part = match authority.rsplit_once('@') {
         Some((userinfo, host)) => {
             match userinfo.split_once(':') {
@@ -274,7 +353,7 @@ pub fn parse_connection_url(text: &str) -> Option<ParsedUrl> {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
             let v = percent_decode(v);
             match k {
-                "sslmode" => out.ssl_mode = SslMode::parse(&v),
+                "sslmode" | "ssl-mode" | "ssl_mode" => out.ssl_mode = SslMode::parse(&v),
                 "user" => out.user = non_empty(v),
                 "password" => out.password = Some(v),
                 "dbname" => out.database = non_empty(v),
@@ -285,6 +364,28 @@ pub fn parse_connection_url(text: &str) -> Option<ParsedUrl> {
         }
     }
     Some(out)
+}
+
+/// `sqlite:///C:/data/app.db`, `sqlite:///home/me/app.db`, `sqlite://app.db`, `sqlite:app.db`.
+fn parse_sqlite(after_scheme: &str) -> Option<ParsedUrl> {
+    let path = after_scheme.strip_prefix("//").unwrap_or(after_scheme);
+    let path = path.split('?').next().unwrap_or(path);
+    // `/C:/…`: a Windows drive after the third slash.
+    let b = path.as_bytes();
+    let path = if b.len() > 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        &path[1..]
+    } else {
+        path
+    };
+    let path = percent_decode(path);
+    if path.is_empty() {
+        return None;
+    }
+    Some(ParsedUrl {
+        engine: Engine::Sqlite,
+        database: Some(path),
+        ..Default::default()
+    })
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -334,8 +435,51 @@ mod tests {
         assert_eq!(u.host.as_deref(), Some("::1"));
         assert_eq!(u.port, Some(5433));
         assert_eq!(u.user.as_deref(), Some("bob"));
-        assert!(parse_connection_url("mysql://x").is_none());
+        assert!(parse_connection_url("mongodb://x").is_none());
         assert!(parse_connection_url("hello").is_none());
+    }
+
+    #[test]
+    fn parses_mysql_and_sqlite() {
+        let u = parse_connection_url("mysql://app:pw@db.example:3307/shop?ssl-mode=REQUIRED").unwrap();
+        assert_eq!(u.engine, Engine::Mysql);
+        assert_eq!((u.host.as_deref(), u.port), (Some("db.example"), Some(3307)));
+        assert_eq!(u.database.as_deref(), Some("shop"));
+        assert_eq!(u.ssl_mode, Some(SslMode::Require));
+        assert_eq!(
+            parse_connection_url("mariadb://root@localhost/x").unwrap().engine,
+            Engine::Mysql
+        );
+        let w = parse_connection_url("sqlite:///C:/data/app.db").unwrap();
+        assert_eq!(
+            (w.engine, w.database.as_deref()),
+            (Engine::Sqlite, Some("C:/data/app.db"))
+        );
+        let unix = parse_connection_url("sqlite:///home/me/app.db").unwrap();
+        assert_eq!(unix.database.as_deref(), Some("/home/me/app.db"));
+        assert_eq!(
+            parse_connection_url("sqlite:app.db").unwrap().database.as_deref(),
+            Some("app.db")
+        );
+        assert_eq!(
+            parse_connection_url("sqlite://my%20app.db")
+                .unwrap()
+                .database
+                .as_deref(),
+            Some("my app.db")
+        );
+        assert!(parse_connection_url("sqlite:").is_none());
+        assert_eq!(
+            parse_connection_url("postgres://h/db").unwrap().engine,
+            Engine::Postgres
+        );
+        // Projects saved before engines existed are Postgres.
+        let old: ConnectionConfig = serde_json::from_str(
+            r#"{"id":"6f1c2b8e-1c55-4b0e-9d43-3f1a2b3c4d5e","name":"x","host":"h","port":5432,"database":"d","user":"u"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.engine, Engine::Postgres);
+        assert!(!serde_json::to_string(&old).unwrap().contains("engine"));
     }
 
     #[test]

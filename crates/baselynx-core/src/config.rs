@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 use crate::error::{CoreError, Result};
 use crate::k8s::{KubeCredentials, KubeTarget};
-use crate::model::{ConnectionColor, ConnectionConfig, ParsedUrl, Project, SslMode, parse_connection_url};
+use crate::model::{ConnectionColor, ConnectionConfig, Engine, ParsedUrl, Project, SslMode, parse_connection_url};
 
 /// The file name baselynx looks for next to its binary.
 pub const FILE_NAME: &str = "baselynx.yaml";
@@ -188,8 +188,11 @@ struct CredentialsFull {
 struct ServerSection {
     #[serde(default)]
     name: Option<String>,
-    /// `postgres://user:password@host:port/database?sslmode=…`; the keys below override
-    /// its parts.
+    /// postgres (default), mysql or sqlite; a `url` names its own.
+    #[serde(default)]
+    engine: Option<Engine>,
+    /// `postgres://user:password@host:port/database?sslmode=…`, `mysql://…`, or
+    /// `sqlite:///path/to/file.db`; the keys below override its parts.
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -621,6 +624,7 @@ pub fn parse(text: &str, path: &Path) -> Result<ConfigFile> {
         let s = match entry {
             ServerEntry::Url(url) => ServerSection {
                 name: None,
+                engine: None,
                 url: Some(url),
                 host: None,
                 port: None,
@@ -636,39 +640,65 @@ pub fn parse(text: &str, path: &Path) -> Result<ConfigFile> {
             ServerEntry::Full(s) => s,
         };
         let url = match s.url.as_deref() {
-            None => ParsedUrl::default(),
+            None => ParsedUrl {
+                engine: s.engine.unwrap_or_default(),
+                ..Default::default()
+            },
             Some(u) => parse_connection_url(u).ok_or_else(|| {
-                CoreError::Invalid(format!("{at}: not a postgres:// or postgresql:// connection string"))
+                CoreError::Invalid(format!(
+                    "{at}: not a connection string (postgres://, mysql://, mariadb:// or sqlite:)"
+                ))
             })?,
         };
+        let engine = url.engine;
+        if let Some(e) = s.engine
+            && e != engine
+        {
+            return Err(CoreError::Invalid(format!(
+                "{at}: engine {} does not match the url ({})",
+                e.label(),
+                engine.label()
+            )));
+        }
         let ssl_mode = match s.ssl.as_deref() {
             None => url.ssl_mode.unwrap_or(SslMode::Prefer),
             Some(v) => SslMode::parse(v).ok_or_else(|| {
                 CoreError::Invalid(format!("{at}.ssl: \"{v}\" (use disable, prefer, require, verify-full)"))
             })?,
         };
-        let host = s
-            .host
-            .or(url.host)
-            .ok_or_else(|| CoreError::Invalid(format!("{at}: no host")))?;
         let database = s
             .database
             .or(url.database)
             .ok_or_else(|| CoreError::Invalid(format!("{at}: no database")))?;
-        let user = s
-            .user
-            .or(url.user)
-            .ok_or_else(|| CoreError::Invalid(format!("{at}: no user")))?;
+        // A SQLite file needs no host or user; its path is relative to this file.
+        let (host, user, database) = if engine.is_file() {
+            (
+                String::new(),
+                String::new(),
+                resolve_path(&database, base).to_string_lossy().into_owned(),
+            )
+        } else {
+            let host = s
+                .host
+                .or(url.host)
+                .ok_or_else(|| CoreError::Invalid(format!("{at}: no host")))?;
+            let user = s
+                .user
+                .or(url.user)
+                .ok_or_else(|| CoreError::Invalid(format!("{at}: no user")))?;
+            (host, user, database)
+        };
         let password = s.password.or(url.password);
         let mut config = ConnectionConfig::new(s.name.clone().unwrap_or_else(|| key.clone()));
+        config.engine = engine;
         config.host = host;
-        config.port = s.port.or(url.port).unwrap_or(5432);
+        config.port = s.port.or(url.port).unwrap_or(engine.default_port());
         config.database = database;
         config.user = user;
         config.ssl_mode = ssl_mode;
         // With a password in the file baselynx keeps it in memory; without one it asks once and
-        // keeps the answer in the keyring.
-        config.save_password = password.is_none();
+        // keeps the answer in the keyring. A SQLite file has none.
+        config.save_password = password.is_none() && !engine.is_file();
         config.color = s.color.unwrap_or(ConnectionColor::None);
         config.read_only = s.mode == Some(Mode::ReadOnly);
         config.config_key = Some(format!("server:{key}"));
@@ -842,6 +872,7 @@ pub fn sync(project: &mut Project, file: &ConfigFile) -> SyncReport {
                 let existing = &mut project.connections[ix];
                 let n = &db.config;
                 existing.config_key = n.config_key.clone();
+                existing.engine = n.engine;
                 existing.host = n.host.clone();
                 existing.port = n.port;
                 existing.database = n.database.clone();
@@ -1114,7 +1145,7 @@ servers:
         assert!(c.password.is_none() && c.config.save_password);
         assert!(!serde_json::to_string(&a.config).unwrap().contains("s3cret"));
         let bad = parse(
-            "version: 1\nproject: p\nservers:\n  a: mysql://x\n",
+            "version: 1\nproject: p\nservers:\n  a: mongodb://x\n",
             Path::new("a.yaml"),
         )
         .unwrap_err();
@@ -1141,6 +1172,33 @@ servers:
     passwrd: x
 ";
         assert_eq!(locate_error(&bad, text), Some((6, 5)), "the misspelt key's own line");
+    }
+
+    #[test]
+    fn mysql_and_sqlite_servers() {
+        let text = "version: 1\nproject: p\nservers:\n  shop: mysql://app:pw@db.example/shop\n  local:\n    url: sqlite:data/app.db\n  keys:\n    engine: mysql\n    host: h\n    database: d\n    user: u\n  file:\n    engine: sqlite\n    database: /abs/x.db\n";
+        let f = parse(text, Path::new("C:/cfg/baselynx.yaml")).unwrap();
+        let shop = &f.databases[0];
+        assert_eq!(shop.config.engine, Engine::Mysql);
+        assert_eq!(shop.config.port, 3306, "MySQL's default port");
+        assert_eq!(shop.password.as_deref(), Some("pw"));
+        let local = &f.databases[1].config;
+        assert_eq!(local.engine, Engine::Sqlite);
+        assert!(Path::new(&local.database).ends_with("data/app.db"));
+        assert!(
+            Path::new(&local.database).starts_with("C:/cfg"),
+            "relative to the config file"
+        );
+        assert!(local.host.is_empty() && !local.save_password);
+        assert_eq!(f.databases[2].config.engine, Engine::Mysql);
+        assert_eq!(f.databases[3].config.engine, Engine::Sqlite);
+        let bad = parse(
+            "version: 1\nproject: p\nservers:\n  a: {engine: sqlite, url: 'mysql://u@h/d'}\n",
+            Path::new("a.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(bad.contains("does not match"), "{bad}");
     }
 
     #[test]

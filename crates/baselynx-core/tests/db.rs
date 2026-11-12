@@ -11,6 +11,7 @@ use baselynx_core::exec;
 use baselynx_core::export::{self, ExportFormat, ExportSource};
 use baselynx_core::model::SortDir;
 use baselynx_core::session::Session;
+use baselynx_core::sql::Dialect;
 use baselynx_core::table::{self, PageRequest};
 use baselynx_core::{CancellationToken, CoreError, watch};
 use common::{block_on, connect, db};
@@ -308,7 +309,7 @@ fn table_rejects_second_statement_and_loads_weird_names() {
     assert_eq!(names, vec!["id", "select", "a\"b"]);
 
     let mut r = page_req("Weird Name", 0, 10);
-    r.filter = Some(table::quick_filter("a\"b", &CellValue::Null, false));
+    r.filter = Some(table::quick_filter("a\"b", &CellValue::Null, false, Dialect::Postgres));
     let p = block_on(table::load_page(&s, &rel, r)).unwrap();
     assert_eq!(p.rows.len(), 1);
     assert_eq!(p.rows[0][0].as_deref(), Some("2"));
@@ -757,7 +758,7 @@ fn catalog_foreign_keys_both_directions() {
     assert_eq!(describe(&s, "composite_key").referenced_by.len(), 1);
 
     // The filter that finds the referenced row.
-    let filter = table::key_filter(&fk.to_cols, &[Some("eu".into()), Some("1".into())]).unwrap();
+    let filter = table::key_filter(&fk.to_cols, &[Some("eu".into()), Some("1".into())], Dialect::Postgres).unwrap();
     let n = block_on(table::count_rows(&s, "demo", "composite_key", Some(filter))).unwrap();
     assert_eq!(n, 1);
 }

@@ -167,6 +167,7 @@ impl ConsoleView {
                 .default_value(text)
         });
         let completion = Rc::new(RefCell::new(Source::default()));
+        completion.borrow_mut().dialect = conn.dialect();
         if let Some(t) = &target {
             let mut s = completion.borrow_mut();
             s.relations = t.relations.clone();
@@ -280,6 +281,7 @@ impl ConsoleView {
         self.conn = target.label();
         {
             let mut s = self.completion.borrow_mut();
+            s.dialect = self.conn.dialect();
             s.relations = target.relations.clone();
             s.catalog = target.catalog.clone();
         }
@@ -478,14 +480,17 @@ impl ConsoleView {
         let e = self.editor.read(cx);
         let text = e.value().to_string();
         if all {
-            return sql::split(&text).into_iter().map(|s| (s.text, s.range.start)).collect();
+            return sql::split_in(&text, self.conn.dialect())
+                .into_iter()
+                .map(|s| (s.text, s.range.start))
+                .collect();
         }
         let sel = e.selected_range();
         if sel.start < sel.end
             && sel.end <= text.len()
             && let Some(selected) = text.get(sel.clone())
         {
-            return sql::split(selected)
+            return sql::split_in(selected, self.conn.dialect())
                 .into_iter()
                 .map(|s| (s.text, sel.start + s.range.start))
                 .collect();
@@ -786,7 +791,7 @@ impl ConsoleView {
                 if let Some(e) = failure {
                     // VACUUM, CREATE INDEX CONCURRENTLY …: offered outside the transaction,
                     // never retried silently.
-                    if e.sqlstate() == Some("25001") {
+                    if e.cannot_run_in_transaction() {
                         let _ = this.update(cx, |this, cx| {
                             this.outside_offer = Some(item.clone());
                             cx.notify();

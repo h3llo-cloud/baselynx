@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use baselynx_core::model::{ConnectionColor, ConnectionConfig, SslMode, parse_connection_url};
+use baselynx_core::model::{ConnectionColor, ConnectionConfig, Engine, SslMode, parse_connection_url};
 use baselynx_core::session;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -26,6 +26,7 @@ enum TestState {
 
 pub struct ConnectionForm {
     base: ConnectionConfig,
+    engine: Engine,
     name: Entity<InputState>,
     host: Entity<InputState>,
     port: Entity<InputState>,
@@ -57,9 +58,9 @@ impl ConnectionForm {
         };
         let name = input(&base.name, "Name shown in the sidebar", window, cx);
         let host = input(&base.host, "localhost", window, cx);
-        let port = input(&base.port.to_string(), "5432", window, cx);
-        let database = input(&base.database, "postgres", window, cx);
-        let user = input(&base.user, "postgres", window, cx);
+        let port = input(&base.port.to_string(), "port", window, cx);
+        let database = input(&base.database, "database", window, cx);
+        let user = input(&base.user, "user", window, cx);
         let password = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -92,6 +93,7 @@ impl ConnectionForm {
             );
         }
         Self {
+            engine: base.engine,
             ssl_mode: base.ssl_mode,
             color: base.color,
             save_password: base.save_password,
@@ -116,9 +118,26 @@ impl ConnectionForm {
         let set = |input: &Entity<InputState>, v: String, window: &mut Window, cx: &mut Context<Self>| {
             input.update(cx, |i, cx| i.set_value(v, window, cx));
         };
+        self.engine = url.engine;
+        if url.engine.is_file() {
+            let path = url.database.clone().unwrap_or_default();
+            set(&self.database, path.clone(), window, cx);
+            let name_now = self.name.read(cx).value().to_string();
+            if name_now.is_empty() || parse_connection_url(&name_now).is_some() || name_now == self.base.name {
+                set(&self.name, file_stem(&path), window, cx);
+            }
+            self.filling = false;
+            cx.notify();
+            return;
+        }
         let host = url.host.clone().unwrap_or_else(|| "localhost".into());
         set(&self.host, host.clone(), window, cx);
-        set(&self.port, url.port.unwrap_or(5432).to_string(), window, cx);
+        set(
+            &self.port,
+            url.port.unwrap_or(url.engine.default_port()).to_string(),
+            window,
+            cx,
+        );
         set(
             &self.database,
             url.database.clone().unwrap_or_else(|| "postgres".into()),
@@ -140,20 +159,85 @@ impl ConnectionForm {
         cx.notify();
     }
 
+    /// Switches the engine; a port still at the old engine's default moves to the new one.
+    fn set_engine(&mut self, engine: Engine, window: &mut Window, cx: &mut Context<Self>) {
+        if engine == self.engine {
+            return;
+        }
+        // Fields still holding another engine's defaults take this engine's.
+        let value = |i: &Entity<InputState>, cx: &App| i.read(cx).value().trim().to_string();
+        let port = value(&self.port, cx);
+        let defaults: Vec<String> = Engine::ALL.iter().map(|e| e.default_port().to_string()).collect();
+        if !engine.is_file() && (port.is_empty() || defaults.contains(&port)) {
+            self.port
+                .update(cx, |i, cx| i.set_value(engine.default_port().to_string(), window, cx));
+        }
+        let (default_db, default_user) = match engine {
+            Engine::Postgres => ("postgres", "postgres"),
+            Engine::Mysql => ("", "root"),
+            Engine::Sqlite => ("", ""),
+        };
+        if matches!(value(&self.database, cx).as_str(), "" | "postgres") {
+            self.database.update(cx, |i, cx| i.set_value(default_db, window, cx));
+        }
+        if matches!(value(&self.user, cx).as_str(), "" | "postgres" | "root") {
+            self.user.update(cx, |i, cx| i.set_value(default_user, window, cx));
+        }
+        self.engine = engine;
+        cx.notify();
+    }
+
+    /// File → the database file, for SQLite.
+    fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = prompt.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                let path = path.to_string_lossy().into_owned();
+                this.database.update(cx, |i, cx| i.set_value(path.clone(), window, cx));
+                if this.name.read(cx).value().trim().is_empty() {
+                    this.name.update(cx, |i, cx| i.set_value(file_stem(&path), window, cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn read(&self, cx: &App) -> Result<FormResult, String> {
         let v = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
         let mut config = self.base.clone();
+        config.engine = self.engine;
         config.name = v(&self.name);
-        config.host = v(&self.host);
         config.database = v(&self.database);
+        config.color = self.color;
+        config.read_only = self.read_only;
+        if self.engine.is_file() {
+            if config.database.is_empty() {
+                return Err("Choose the database file.".into());
+            }
+            config.host = String::new();
+            config.user = String::new();
+            config.port = 0;
+            config.save_password = false;
+            if config.name.is_empty() {
+                config.name = file_stem(&config.database);
+            }
+            return Ok(FormResult { config, password: None });
+        }
+        config.host = v(&self.host);
         config.user = v(&self.user);
         config.port = v(&self.port)
             .parse()
             .map_err(|_| "The port must be a number from 1 to 65535.".to_string())?;
         config.ssl_mode = self.ssl_mode;
-        config.color = self.color;
         config.save_password = self.save_password;
-        config.read_only = self.read_only;
         if config.host.is_empty() {
             return Err("Enter a host.".into());
         }
@@ -181,7 +265,7 @@ impl ConnectionForm {
             let result = fut.await;
             let _ = this.update(cx, |this, cx| {
                 this.test = match result {
-                    Ok(s) => TestState::Ok(format!("Connected · PostgreSQL {}", s.server_version())),
+                    Ok(s) => TestState::Ok(format!("Connected · {} {}", s.engine().label(), s.server_version())),
                     Err(e) => TestState::Failed(e.to_string()),
                 };
                 cx.notify();
@@ -247,6 +331,8 @@ impl ConnectionForm {
 impl Render for ConnectionForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kube = self.base.kube.clone();
+        let engine = self.engine;
+        let file = engine.is_file();
         let secret_backed = kube.as_ref().is_some_and(|k| k.credentials.secret.is_some());
         let ssl = self.ssl_mode;
         let color = self.color;
@@ -265,11 +351,21 @@ impl Render for ConnectionForm {
                     .child(if kube.is_some() {
                         "A database in Kubernetes: baselynx opens a port-forward and reads the credentials from its secret."
                     } else {
-                        "Paste a postgres:// URL into any field to fill them all."
+                        "Paste a postgres://, mysql:// or sqlite: connection string into any field to fill them all."
                     }),
             )
             .child(
                 v_form()
+                    .when(kube.is_none(), |form| {
+                        form.child(field().label("Engine").child(h_flex().gap_1().children(Engine::ALL.map(|e| {
+                            Button::new(SharedString::from(format!("engine-{}", e.label())))
+                                .label(e.label())
+                                .small()
+                                .when(engine == e, |b| b.primary())
+                                .when(engine != e, |b| b.outline())
+                                .on_click(cx.listener(move |this, _, window, cx| this.set_engine(e, window, cx)))
+                        }))))
+                    })
                     .child(field().label("Name").child(Input::new(&self.name)))
                     .when_some(kube.clone(), |form, k| {
                         let credentials = match &k.credentials.secret {
@@ -285,7 +381,23 @@ impl Render for ConnectionForm {
                                 .child(div().text_color(tokens::secondary_text(cx)).child(credentials)),
                         ))
                     })
-                    .when(kube.is_none(), |form| form.child(
+                    .when(kube.is_none() && file, |form| {
+                        form.child(
+                            field().label("File").child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().flex_1().child(Input::new(&self.database)))
+                                    .child(
+                                        Button::new("browse-file")
+                                            .label("Browse…")
+                                            .small()
+                                            .outline()
+                                            .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
+                                    ),
+                            ),
+                        )
+                    })
+                    .when(kube.is_none() && !file, |form| form.child(
                         field().label("Host").child(
                             h_flex()
                                 .gap_2()
@@ -300,7 +412,7 @@ impl Render for ConnectionForm {
                             .label("Password")
                             .child(Input::new(&self.password).mask_toggle()),
                     ))
-                    .child(
+                    .when(!file, |form| form.child(
                         field()
                             .label("SSL")
                             .child(h_flex().gap_1().children(SslMode::ALL.map(|m| {
@@ -314,7 +426,7 @@ impl Render for ConnectionForm {
                                         cx.notify();
                                     }))
                             }))),
-                    )
+                    ))
                     .child(
                         field()
                             .label("Colour")
@@ -372,7 +484,7 @@ impl Render for ConnectionForm {
                                 ),
                         )
                     })
-                    .when(!secret_backed, |form| form.child(
+                    .when(!secret_backed && !file, |form| form.child(
                         field().child(
                             Checkbox::new("save-password")
                                 .label("Save password in the OS keyring")
@@ -410,6 +522,14 @@ impl Render for TextPrompt {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().child(Input::new(&self.input).when(self.masked, |i| i.mask_toggle()))
     }
+}
+
+/// "app" for `C:\data\app.db`.
+fn file_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1,4 +1,8 @@
-//! One PostgreSQL connection.
+//! One database connection: PostgreSQL, MySQL/MariaDB or SQLite.
+//!
+//! The rest of the core works through [`Session`] and branches on [`Conn`] where engines
+//! differ; Postgres code lives here and in the modules that predate other engines, the
+//! others in [`crate::engine`].
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,16 +19,23 @@ use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::APP_NAME;
+use crate::engine::sqlite::Lite;
 use crate::error::{CoreError, Result};
 use crate::k8s::{self, KubeTarget};
-use crate::model::{ConnectionConfig, SslMode};
+use crate::model::{ConnectionConfig, Engine, SslMode};
 use crate::runtime;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The engine-specific connection inside a [`Session`].
+pub(crate) enum Conn {
+    Pg { client: Client, tls: MakeRustlsConnect },
+    Sqlite(Lite),
+}
+
 pub struct Session {
-    client: Client,
-    tls: MakeRustlsConnect,
+    conn: Conn,
+    engine: Engine,
     server_version: String,
     /// Set when the session runs through a Kubernetes port-forward; cancel requests need
     /// their own stream.
@@ -38,15 +49,44 @@ pub struct Session {
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
+            .field("engine", &self.engine)
             .field("server_version", &self.server_version)
-            .field("closed", &self.client.is_closed())
+            .field("closed", &self.is_closed())
             .finish()
     }
 }
 
 impl Session {
+    pub(crate) fn new(conn: Conn, engine: Engine, server_version: String, read_only: bool) -> Self {
+        Self {
+            conn,
+            engine,
+            server_version,
+            kube: None,
+            pooled: AtomicBool::new(false),
+            read_only,
+        }
+    }
+
+    pub(crate) fn conn(&self) -> &Conn {
+        &self.conn
+    }
+
+    pub fn engine(&self) -> Engine {
+        self.engine
+    }
+
+    pub fn dialect(&self) -> crate::sql::Dialect {
+        self.engine.dialect()
+    }
+
+    /// The Postgres client. Panics for other engines: call it only in Postgres code paths
+    /// (and Postgres tests).
     pub fn client(&self) -> &Client {
-        &self.client
+        match &self.conn {
+            Conn::Pg { client, .. } => client,
+            _ => panic!("client() on a {} session", self.engine.label()),
+        }
     }
 
     /// `server_version` as the server reports it, e.g. `17.2`.
@@ -81,15 +121,24 @@ impl Session {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.client.is_closed()
+        match &self.conn {
+            Conn::Pg { client, .. } => client.is_closed(),
+            Conn::Sqlite(_) => false,
+        }
     }
 
     /// Asks the server to cancel whatever this session is running. Safe to call when idle.
     pub fn cancel(self: &Arc<Self>) -> impl Future<Output = Result<()>> + Send + 'static {
-        let token = self.client.cancel_token();
-        let mut tls = self.tls.clone();
+        let pg = match &self.conn {
+            Conn::Pg { client, tls } => Some((client.cancel_token(), tls.clone())),
+            Conn::Sqlite(lite) => {
+                lite.interrupt();
+                None
+            }
+        };
         let kube = self.kube.clone();
         runtime::spawn(async move {
+            let Some((token, mut tls)) = pg else { return Ok(()) };
             match kube {
                 None => token.cancel_query(tls).await?,
                 Some(t) => {
@@ -111,11 +160,14 @@ pub fn connect(
 ) -> impl Future<Output = Result<Arc<Session>>> + Send + 'static {
     let config = config.clone();
     runtime::spawn(async move {
+        if config.engine == Engine::Sqlite {
+            return Ok(Arc::new(crate::engine::sqlite::connect(&config).await?));
+        }
         let session = connect_any(config.clone(), password).await?;
         if config.read_only {
             // The server refuses every write of the session with its own error.
             session
-                .client
+                .client()
                 .simple_query("SET default_transaction_read_only = on")
                 .await?;
         }
@@ -163,14 +215,12 @@ async fn connect_any(config: ConnectionConfig, password: Option<String>) -> Resu
             let _ = connection.await;
         });
         let server_version = server_version(&client).await?;
-        Ok(Arc::new(Session {
-            client,
-            tls,
+        Ok(Arc::new(Session::new(
+            Conn::Pg { client, tls },
+            Engine::Postgres,
             server_version,
-            kube: None,
-            pooled: AtomicBool::new(false),
-            read_only: config.read_only,
-        }))
+            config.read_only,
+        )))
     }
 }
 
@@ -216,14 +266,15 @@ async fn connect_kube(config: ConnectionConfig, target: KubeTarget, password: Op
         let _ = connection.await;
     });
     let server_version = server_version(&client).await?;
-    Ok(Arc::new(Session {
-        client,
-        tls,
+    let mut session = Session::new(
+        Conn::Pg { client, tls },
+        Engine::Postgres,
         server_version,
-        pooled: AtomicBool::new(target.service.contains("pooler")),
-        kube: Some(target),
-        read_only: config.read_only,
-    }))
+        config.read_only,
+    );
+    session.pooled = AtomicBool::new(target.service.contains("pooler"));
+    session.kube = Some(target);
+    Ok(Arc::new(session))
 }
 
 fn provider() -> Arc<CryptoProvider> {

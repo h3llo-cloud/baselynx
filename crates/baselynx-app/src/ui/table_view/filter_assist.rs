@@ -99,7 +99,7 @@ impl TableView {
         if s.word.end > text.len() {
             return false;
         }
-        let insert = format!("{} ", ident_sql(name));
+        let insert = format!("{} ", ident_sql(name, self.conn.dialect()));
         let new_text = format!("{}{}{}", &text[..s.word.start], insert, &text[s.word.end..]);
         let caret = s.word.start + insert.len();
         self.filter_input.update(cx, |i, cx| {

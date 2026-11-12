@@ -1,4 +1,5 @@
-//! Schemas, relations, columns and row keys from `pg_catalog`.
+//! Schemas, relations, columns and row keys: from `pg_catalog` here, from each engine's
+//! own catalog in [`crate::engine`].
 //!
 //! Queries use unnamed statements (`query_typed`), which work through PgBouncer in
 //! transaction pooling, as Kubernetes `-pooler` services run it.
@@ -8,7 +9,9 @@ use std::sync::Arc;
 
 use tokio_postgres::types::Type;
 
+use crate::engine::sqlite;
 use crate::error::Result;
+use crate::model::Engine;
 use crate::runtime;
 use crate::session::Session;
 
@@ -153,6 +156,9 @@ const SYSTEM_FILTER: &str =
 pub fn list_schemas(session: &Arc<Session>) -> impl Future<Output = Result<Vec<SchemaInfo>>> + Send + 'static {
     let session = session.clone();
     runtime::spawn(async move {
+        if session.engine() == Engine::Sqlite {
+            return sqlite::list_schemas(&session).await;
+        }
         let sql = format!(
             "SELECT n.nspname::text, (n.nspname IN ('pg_catalog', 'information_schema')) AS system \
              FROM pg_catalog.pg_namespace n WHERE {SYSTEM_FILTER} ORDER BY 2, 1"
@@ -175,6 +181,9 @@ pub fn list_relations(
     let session = session.clone();
     let schema = schema.to_string();
     runtime::spawn(async move {
+        if session.engine() == Engine::Sqlite {
+            return sqlite::list_relations(&session, schema).await;
+        }
         let sql = format!(
             "SELECT n.nspname::text, c.relname::text, c.relkind::text, c.reltuples::float8, {PRIMARY_KEY_COLS} \
              FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -190,6 +199,9 @@ pub fn list_relations(
 pub fn list_all_relations(session: &Arc<Session>) -> impl Future<Output = Result<Vec<RelationRef>>> + Send + 'static {
     let session = session.clone();
     runtime::spawn(async move {
+        if session.engine() == Engine::Sqlite {
+            return sqlite::list_all_relations(&session).await;
+        }
         let sql = format!(
             "SELECT n.nspname::text, c.relname::text, c.relkind::text, c.reltuples::float8, {PRIMARY_KEY_COLS} \
              FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -223,6 +235,9 @@ pub fn list_columns(
     let schema = schema.to_string();
     let name = name.to_string();
     runtime::spawn(async move {
+        if session.engine() == Engine::Sqlite {
+            return sqlite::list_columns(&session, schema, name).await;
+        }
         let rows = session
             .client()
             .query_typed(
@@ -299,6 +314,9 @@ pub fn column_stats(
     let session = session.clone();
     let (schema, table, column) = (schema.to_string(), table.to_string(), column.to_string());
     runtime::spawn(async move {
+        if session.engine() == Engine::Sqlite {
+            return Ok(None);
+        }
         let rows = session
             .client()
             .query_typed(
@@ -350,6 +368,9 @@ pub fn describe_relation(
     let schema = schema.to_string();
     let name = name.to_string();
     runtime::spawn(async move {
+        if session.engine() == Engine::Sqlite {
+            return sqlite::describe_relation(&session, schema, name).await;
+        }
         let client = session.client();
         let rel = client
             .query_typed(

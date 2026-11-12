@@ -678,10 +678,7 @@ impl Workspace {
                 let read_only = c.read_only;
                 let mut tip = match &c.kube {
                     Some(k) => format!("{} · {state_label} · {}", c.name, k.describe()),
-                    None => format!(
-                        "{} · {state_label} · {}@{}:{}/{}",
-                        c.name, c.user, c.host, c.port, c.database
-                    ),
+                    None => format!("{} · {state_label} · {}", c.name, c.describe()),
                 };
                 if let Some(ConnStatus::Failed(e)) = rt.map(|r| &r.status) {
                     tip.push('\n');
@@ -1054,11 +1051,15 @@ pub(super) fn rel_menu(menu: PopupMenu, weak: WeakEntity<Workspace>, id: Uuid, s
         let _ = w1.update(cx, |this, cx| this.open_table(id, &s1, &n1, window, cx));
     }))
     .item(PopupMenuItem::new("Open in console").on_click(move |_, window, cx| {
-        let sql = format!(
-            "SELECT * FROM {} LIMIT 100;",
-            baselynx_core::sql::quote_qualified(&s2, &n2)
-        );
-        let _ = w2.update(cx, |this, cx| this.open_console(id, Some(sql), window, cx));
+        let _ = w2.update(cx, |this, cx| {
+            let d = this
+                .project
+                .connection(id)
+                .map(|c| c.engine.dialect())
+                .unwrap_or_default();
+            let sql = format!("SELECT * FROM {} LIMIT 100;", d.qualified(&s2, &n2));
+            this.open_console(id, Some(sql), window, cx)
+        });
     }))
 }
 
