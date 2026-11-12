@@ -6,6 +6,9 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+authors = ["h3llo.cloud"]
+repository = "https://github.com/h3llo-cloud/baselynx"
+homepage = "https://github.com/h3llo-cloud/baselynx"
 description = "A fast desktop client for PostgreSQL, with Kubernetes port-forwards, backups and guarded restores."
 keywords = ["postgresql", "database", "client", "gui", "kubernetes"]
 categories = ["database", "gui"]
@@ -26,3 +29,8 @@ ttf-parser = { opt-level = 3 }
 [profile.release]
 lto = "thin"
 codegen-units = 4
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

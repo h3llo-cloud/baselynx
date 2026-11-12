@@ -1,0 +1,34 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.34.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "msi"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Installs `baselynx-update` beside the app: it fetches and installs the latest release
+install-updater = true
+# wix/main.wxs is edited by hand (a Start menu shortcut): dist must not regenerate it
+allow-dirty = ["msi"]
+# Installed for users without Rust: ~/.local/bin (or $XDG_BIN_HOME) on macOS and Linux,
+# %USERPROFILE%\.local\bin on Windows; the MSI installs to Program Files.
+install-path = ["$XDG_BIN_HOME/", "~/.local/bin"]
+
+# GPUI's system libraries on the Linux build machines (the README's Linux build list)
+[dist.dependencies.apt]
+clang = "*"
+libfontconfig-dev = "*"
+libfreetype-dev = "*"
+libwayland-dev = "*"
+libwebkit2gtk-4.1-dev = "*"
+libxkbcommon-dev = "*"
+libxkbcommon-x11-dev = "*"
+libx11-xcb-dev = "*"
+libssl-dev = "*"
+libzstd-dev = "*"
+libasound2-dev = "*"

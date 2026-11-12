@@ -1,10 +1,23 @@
 [package]
-name = "baselynx-app"
+name = "baselynx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description.workspace = true
 publish.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+
+# Released with dist (dist-workspace.toml); `publish = false` only keeps it off crates.io.
+[package.metadata.dist]
+dist = true
+
+[package.metadata.wix]
+upgrade-guid = "9B56414F-085F-4B90-875A-9120F6F81B00"
+path-guid = "4C780C08-A65D-4BA6-97A0-921A440DD2AF"
+license = false
+eula = false
 
 [[bin]]
 name = "baselynx"

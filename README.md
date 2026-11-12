@@ -70,12 +70,39 @@ statement, and guarded writes on red and amber connections.
 One `baselynx.yaml` describes every server and Kubernetes database, with schedules and modes; the app edits
 and checks it in place.
 
-## Quick start
+## Install
+
+Prebuilt for Windows (x64), macOS (Apple silicon and Intel) and Linux (x64 and arm64); no Rust needed.
+
+```sh
+# macOS and Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/h3llo-cloud/baselynx/releases/latest/download/baselynx-installer.sh | sh
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/h3llo-cloud/baselynx/releases/latest/download/baselynx-installer.ps1 | iex"
+```
+
+The installers put `baselynx` in `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows), add it to `PATH`, and
+install `baselynx-update` beside it: run `baselynx-update` to move to the latest release. On Windows there is
+also an `.msi` on the [releases page](https://github.com/h3llo-cloud/baselynx/releases), with a Start menu entry;
+to update, install the newer `.msi` over it.
+
+The builds are not code-signed yet. Installed with the commands above they start normally; a downloaded `.msi`
+shows a SmartScreen warning ("More info", then "Run anyway"). On Linux the app needs a Wayland or X11 session
+with a Vulkan driver, and `libxkbcommon`, `libxkbcommon-x11`, `libwayland`, `fontconfig` and `freetype`, which
+desktop installations have.
+
+Installed, baselynx keeps its data in the configuration directory (see
+[Where things are stored](#where-things-are-stored)); File → Open config file… adds a `baselynx.yaml` as a project.
+
+## Quick start from source
 
 ```sh
 git clone <this repository> baselynx && cd baselynx
 cp baselynx.example.yaml baselynx.yaml     # then edit it: your servers or clusters
-cargo run --release -p baselynx-app
+cargo run --release -p baselynx
 ```
 
 A `baselynx.yaml` in the repository root opens at every start of a build from `target/`. Without one,
@@ -87,8 +114,8 @@ coding agents are in [llms.txt](llms.txt).
 Rust 1.92 or later (the toolchain used here is 1.99). The first build takes several minutes.
 
 ```sh
-cargo build --release -p baselynx-app      # binary: target/release/baselynx(.exe)
-cargo run -p baselynx-app                  # debug build
+cargo build --release -p baselynx      # binary: target/release/baselynx(.exe)
+cargo run -p baselynx                  # debug build
 ```
 
 Per system:
