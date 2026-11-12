@@ -1,6 +1,6 @@
 # baselynx
 
-> baselynx is a fast desktop client for PostgreSQL only (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain PostgreSQL servers and to databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups with pg_dump. Its databases come from one YAML file, `baselynx.yaml`. Licence: MIT OR Apache-2.0.
+> baselynx is a fast desktop client for PostgreSQL that also speaks MySQL/MariaDB and SQLite (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain servers, SQLite files and databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups. Its databases come from one YAML file, `baselynx.yaml`. PostgreSQL is the first-class engine; the README's "Engines" table lists what the others lack. Licence: MIT OR Apache-2.0.
 
 This file tells a coding agent how to build, run and test baselynx on each system, and how to write its config file. Facts here match the code in this repository; when in doubt, read `baselynx.example.yaml` and `crates/baselynx-core/src/config.rs`.
 
@@ -63,7 +63,7 @@ Saved passwords use the Secret Service (GNOME Keyring or KWallet) over D-Bus; wi
 ## Run
 
 - `target/release/baselynx` starts the app. It opens `baselynx.yaml` when it finds one (see "Where the config file is looked for"), otherwise the last project.
-- Backups and restores need `pg_dump`, `pg_restore` and `psql` (PostgreSQL client tools, ideally the same major version as the servers or newer). They are taken from `backups.tools` in the config file, else `PATH`, else on Windows the newest `C:\Program Files\PostgreSQL\<version>\bin`. Debian/Ubuntu: `sudo apt install postgresql-client`; macOS: `brew install libpq` and add its `bin` to `PATH`.
+- Backups and restores of PostgreSQL need `pg_dump`, `pg_restore` and `psql`; of MySQL/MariaDB, `mysqldump` and `mysql` (or MariaDB's `mariadb-dump` and `mariadb`, installed under both names); SQLite needs no tools. Use client tools of the same major version as the servers, or newer. They are taken from `backups.tools` in the config file, else `PATH`, else on Windows the newest `C:\Program Files\PostgreSQL\<version>\bin`. Debian/Ubuntu: `sudo apt install postgresql-client`; macOS: `brew install libpq` and add its `bin` to `PATH`.
 
 Environment variables:
 
@@ -79,7 +79,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- Integration tests need a PostgreSQL server. With `BASELYNX_TEST_DSN=postgres://user:password@host:5432/postgres` (a role that may create databases) they use it. Without it they download PostgreSQL once (network needed on the first run) into `target/baselynx-testdb` and start it on `127.0.0.1:54329`, password `baselynx-test`; it keeps running for later runs.
+- SQLite tests need nothing. MySQL/MariaDB tests run only with `BASELYNX_TEST_MYSQL_DSN=mysql://root:password@127.0.0.1:3306/` (a user who may create databases; the backup test also needs `mysqldump`/`mysql` on PATH or in `BASELYNX_TEST_MYSQL_TOOLS`); without it they pass without connecting.
+- The other integration tests need a PostgreSQL server. With `BASELYNX_TEST_DSN=postgres://user:password@host:5432/postgres` (a role that may create databases) they use it. Without it they download PostgreSQL once (network needed on the first run) into `target/baselynx-testdb` and start it on `127.0.0.1:54329`, password `baselynx-test`; it keeps running for later runs.
 - The window tests need two exact pins in `Cargo.lock`: `taffy 0.15.0` and `unicode-properties 0.1.3`. Do not run a bare `cargo update`; if it happened, run `cargo update -p taffy --precise 0.15.0` and `cargo update -p unicode-properties --precise 0.1.3`.
 - `crates/baselynx-core/tests/kube_live.rs` is an ignored, read-only check against a real cluster (`BASELYNX_LIVE_CONFIG`, `BASELYNX_LIVE_DB`, `--ignored`).
 
@@ -94,6 +95,8 @@ version: 1
 project: My databases
 servers:
   local: postgres://postgres:secret@127.0.0.1:5432/postgres?sslmode=disable
+  crm: mysql://app:secret@127.0.0.1:3306/crm
+  notes: sqlite:notes.db              # a SQLite file next to the config file
 ```
 
 Full shape:
@@ -111,14 +114,17 @@ backups:                          # optional; every key optional
 
 servers:                          # databases reached directly
   analytics: postgres://report:secret@db.example.com:5432/analytics?sslmode=require   # a connection string
+  crm: mysql://app:secret@crm.example.com:3306/crm          # MySQL or MariaDB (mariadb:// works too)
+  notes: sqlite:data/notes.db       # SQLite: a file path, relative to this file; a missing file is an error
   staging:
     url: postgresql://shop@staging.example.com/shop   # a string plus keys that override its parts
     password: secret
   local:                          # or keys only
     name: Local shop              # shown name; default: the key
-    host: 127.0.0.1               # required unless url gives it
-    port: 5432                    # default 5432
-    database: shop                # required unless url gives it
+    engine: postgres              # postgres (default), mysql or sqlite; a url names its own
+    host: 127.0.0.1               # required unless url gives it (not for sqlite)
+    port: 5432                    # default 5432, 3306 for mysql
+    database: shop                # required unless url gives it; for sqlite, the file path
     user: shop                    # required unless url gives it
     password: secret              # optional, plain text; omitted: asked once, kept in the OS keyring
     ssl: prefer                   # disable | prefer | require | verify-full
@@ -135,6 +141,7 @@ clusters:                         # databases inside Kubernetes
     namespaces:                   # Kubernetes namespace -> databases in it
       billing:
         orders-db:
+          engine: postgres        # postgres (default) or mysql (port then defaults to 3306)
           service: orders-db-rw   # the primary's Service; or `pod: orders-db-0` instead
           replica: orders-db-ro   # optional: read-only mode and backups use it
           port: 5432              # the Service (or container) port; default 5432

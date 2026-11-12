@@ -151,7 +151,8 @@ pub fn is_write(sql: &str) -> bool {
     match first.upper.as_str() {
         // `SELECT … INTO new_table` creates a table.
         "SELECT" => w.iter().any(|x| x.depth == 0 && keyword(x, "INTO")),
-        "SHOW" | "VALUES" | "TABLE" => false,
+        // MySQL's DESCRIBE / DESC show a table's columns.
+        "SHOW" | "VALUES" | "TABLE" | "DESCRIBE" | "DESC" => false,
         "WITH" => any_write_verb(),
         // EXPLAIN ANALYZE runs the statement.
         "EXPLAIN" => w.iter().any(|x| keyword(x, "ANALYZE") || keyword(x, "ANALYSE")) && any_write_verb(),
@@ -236,6 +237,8 @@ mod tests {
             "show work_mem",
             "values (1)",
             "table t",
+            "describe customers",
+            "DESC orders",
             "explain select 1",
             "explain update t set a = 1",
             "with x as (select 1) select * from x",

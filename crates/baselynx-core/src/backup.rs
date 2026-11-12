@@ -23,12 +23,11 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
 use tokio::process::Command;
 
 use crate::config::{BackupFormat, BackupPlan, BackupSettings, BackupSource, Keep};
 use crate::error::{CoreError, Result};
-use crate::k8s::{self, KubeTarget};
+use crate::k8s;
 use crate::model::{ConnectionConfig, Engine, SslMode};
 use crate::runtime;
 
@@ -164,19 +163,15 @@ struct Endpoint {
     ssl_mode: SslMode,
     /// For the manifest and messages.
     source: String,
-    _proxy: Option<tokio::task::AbortHandle>,
-}
-
-impl Drop for Endpoint {
-    fn drop(&mut self) {
-        if let Some(h) = &self._proxy {
-            h.abort();
-        }
-    }
+    engine: Engine,
+    _proxy: Option<k8s::LocalForward>,
 }
 
 impl Endpoint {
     fn command(&self, tool: &Path) -> Command {
+        if self.engine == Engine::Mysql {
+            return self.mysql_command(tool);
+        }
         let mut cmd = tool_command(tool);
         // -w: fail instead of prompting for a password nobody can type.
         cmd.arg("-w")
@@ -205,6 +200,27 @@ impl Endpoint {
         }
         cmd
     }
+
+    /// mysqldump / mysql (or MariaDB's): the password goes in `MYSQL_PWD`, never the
+    /// command line.
+    fn mysql_command(&self, tool: &Path) -> Command {
+        let mut cmd = tool_command(tool);
+        cmd.arg("--protocol=TCP")
+            .arg("-h")
+            .arg(&self.host)
+            .arg("-P")
+            .arg(self.port.to_string())
+            .arg("-u")
+            .arg(&self.user)
+            .arg("--default-character-set=utf8mb4")
+            .env_remove("MYSQL_PWD")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(p) = &self.password {
+            cmd.env("MYSQL_PWD", p);
+        }
+        cmd
+    }
 }
 
 /// The primary, or the replica when `replica` is set and the database has one.
@@ -218,6 +234,7 @@ async fn endpoint(config: &ConnectionConfig, password: Option<String>, replica: 
             password,
             ssl_mode: config.ssl_mode,
             source: format!("{}:{}", config.host, config.port),
+            engine: config.engine,
             _proxy: None,
         });
     };
@@ -225,36 +242,19 @@ async fn endpoint(config: &ConnectionConfig, password: Option<String>, replica: 
         target.service = ro;
     }
     let creds = k8s::credentials(&target, config).await?;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| CoreError::Connect(format!("local listener: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| CoreError::Connect(format!("local listener: {e}")))?
-        .port();
     let source = format!("{}/{}/{}", target.cluster, target.namespace, target.service);
-    let proxy = tokio::spawn(proxy(listener, target)).abort_handle();
+    let forward = k8s::local_forward(target).await?;
     Ok(Endpoint {
         host: "127.0.0.1".into(),
-        port,
+        port: forward.port,
         database: creds.database,
         user: creds.username,
         password: creds.password.or(password),
         ssl_mode: config.ssl_mode,
         source,
-        _proxy: Some(proxy),
+        engine: config.engine,
+        _proxy: Some(forward),
     })
-}
-
-async fn proxy(listener: TcpListener, target: KubeTarget) {
-    while let Ok((mut socket, _)) = listener.accept().await {
-        let target = target.clone();
-        tokio::spawn(async move {
-            if let Ok(mut stream) = k8s::open_stream(&target).await {
-                let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
-            }
-        });
-    }
 }
 
 /// Runs a tool; the error carries its stderr (never the password, which is in the environment).
@@ -564,7 +564,10 @@ pub fn status(settings: &BackupSettings, config: &ConnectionConfig) -> Status {
 async fn backup_inner(job: BackupJob) -> Result<BackupRun> {
     let tools = job.settings.tools.clone();
     let engine = job.config.engine;
-    let dump = pg_tool("pg_dump", tools.as_deref());
+    let dump = match engine {
+        Engine::Mysql => pg_tool("mysqldump", tools.as_deref()),
+        Engine::Postgres | Engine::Sqlite => pg_tool("pg_dump", tools.as_deref()),
+    };
     let pg_dump_version = match engine {
         Engine::Sqlite => format!("SQLite {} backup API", rusqlite::version()),
         Engine::Postgres | Engine::Mysql => tool_version(&dump).await?,
@@ -588,7 +591,8 @@ async fn backup_inner(job: BackupJob) -> Result<BackupRun> {
         std::fs::create_dir_all(&partial).map_err(|e| CoreError::Storage(format!("{}: {e}", partial.display())))?;
         let dumped = match engine {
             Engine::Sqlite => sqlite_dump(&job, &partial).await,
-            Engine::Postgres | Engine::Mysql => dump_into(&job, &dump, &partial, replica).await,
+            Engine::Mysql => mysql_dump(&job, &dump, &partial, replica).await,
+            Engine::Postgres => dump_into(&job, &dump, &partial, replica).await,
         };
         match dumped {
             Ok((files, source, database, server_version)) => {
@@ -604,7 +608,12 @@ async fn backup_inner(job: BackupJob) -> Result<BackupRun> {
                     finished: Utc::now(),
                     pg_dump_version: pg_dump_version.clone(),
                     server_version,
-                    formats: job.plan.formats.clone(),
+                    formats: files.iter().map(|f| f.format).fold(Vec::new(), |mut v, f| {
+                        if !v.contains(&f) {
+                            v.push(f);
+                        }
+                        v
+                    }),
                     files,
                     row_security: job.plan.row_security,
                     excluded_tables: job.plan.exclude_tables.clone(),
@@ -679,6 +688,59 @@ async fn sqlite_dump(job: &BackupJob, dir: &Path) -> Result<(Vec<ManifestFile>, 
         Ok((files, src.clone(), database, rusqlite::version().to_string()))
     })
     .await
+}
+
+/// MySQL and MariaDB: always the SQL files, from mysqldump (a `dump` format is taken as
+/// SQL). `schema.sql` holds tables, views and routines; `data.sql` the rows; `indexes.sql`
+/// the triggers, which run after the rows are in.
+async fn mysql_dump(
+    job: &BackupJob,
+    dump: &Path,
+    dir: &Path,
+    replica: bool,
+) -> Result<(Vec<ManifestFile>, String, String, String)> {
+    let ep = endpoint(&job.config, job.password.clone(), replica).await?;
+    let timeout = job.settings.timeout();
+    let parts: [(&str, &[&str]); 3] = [
+        (
+            "schema.sql",
+            &["--no-data", "--skip-triggers", "--routines", "--events"],
+        ),
+        (
+            "data.sql",
+            &["--no-create-info", "--skip-triggers", "--skip-routines", "--hex-blob"],
+        ),
+        (
+            "indexes.sql",
+            &["--no-data", "--no-create-info", "--triggers", "--skip-routines"],
+        ),
+    ];
+    let mut files = Vec::new();
+    for (name, flags) in parts {
+        let mut cmd = ep.command(dump);
+        // One consistent snapshot, without locking tables (InnoDB).
+        cmd.arg("--single-transaction").arg("--no-tablespaces").args(flags);
+        for t in &job.plan.exclude_tables {
+            let t = if t.contains('.') {
+                t.clone()
+            } else {
+                format!("{}.{t}", ep.database)
+            };
+            cmd.arg(format!("--ignore-table={t}"));
+        }
+        cmd.arg(format!("--result-file={}", dir.join(name).display()))
+            .arg(&ep.database);
+        run(cmd, &format!("mysqldump from {}", ep.source), timeout).await?;
+        let (sha256, bytes) = sha256_file(&dir.join(name))?;
+        files.push(ManifestFile {
+            name: name.to_string(),
+            format: BackupFormat::Sql,
+            bytes,
+            sha256,
+        });
+    }
+    let server_version = server_version_of(dir, &files).await;
+    Ok((files, ep.source.clone(), ep.database.clone(), server_version))
 }
 
 async fn dump_into(
@@ -757,7 +819,10 @@ async fn server_version_of(dir: &Path, files: &[ManifestFile]) -> String {
     let n = file.read(&mut head).await.unwrap_or(0);
     String::from_utf8_lossy(&head[..n])
         .lines()
-        .find_map(|l| l.strip_prefix("-- Dumped from database version "))
+        .find_map(|l| {
+            l.strip_prefix("-- Dumped from database version ")
+                .or_else(|| l.strip_prefix("-- Server version"))
+        })
         .unwrap_or_default()
         .trim()
         .to_string()
@@ -905,11 +970,23 @@ async fn preflight_inner(
     // The tool of every format the backup has: the dialog lets the user pick either.
     // SQLite restores need no tools.
     let formats = manifest.as_ref().map(|m| m.formats.clone()).unwrap_or_default();
-    let needs_tools = target.engine != Engine::Sqlite;
-    for needed in [(BackupFormat::Dump, "pg_restore"), (BackupFormat::Sql, "psql")]
-        .into_iter()
-        .filter(|(f, _)| needs_tools && formats.contains(f))
-        .map(|(_, tool)| tool)
+    let tools_for: &[(BackupFormat, &str)] = match target.engine {
+        Engine::Postgres => &[(BackupFormat::Dump, "pg_restore"), (BackupFormat::Sql, "psql")],
+        Engine::Mysql => &[(BackupFormat::Sql, "mysql")],
+        Engine::Sqlite => &[],
+    };
+    if target.engine == Engine::Mysql {
+        push(
+            "MySQL runs schema changes outside transactions",
+            true,
+            "a restore that fails part-way leaves what it created; the target must be empty, so drop it and retry"
+                .into(),
+        );
+    }
+    for needed in tools_for
+        .iter()
+        .filter(|(f, _)| formats.contains(f))
+        .map(|(_, tool)| *tool)
     {
         match tool_version(&pg_tool(needed, tools)).await {
             Ok(v) => push(&format!("{needed} is available"), true, v),
@@ -937,6 +1014,30 @@ async fn preflight_inner(
                 )
             }
             Err(e) => push("The target database is empty", false, format!("could not open it: {e}")),
+        }
+    } else if target.engine == Engine::Mysql {
+        match crate::session::connect(&look, password).await {
+            Ok(s) => match crate::engine::mysql::objects(&s).await {
+                Ok((db, found)) => {
+                    database = Some(db);
+                    if found.is_empty() {
+                        push("The target database is empty", true, String::new());
+                    } else {
+                        let mut found = found;
+                        if found.len() > 3 {
+                            found.truncate(3);
+                            found.push("more".into());
+                        }
+                        push(
+                            "The target database is empty",
+                            false,
+                            format!("it holds {}", found.join(", ")),
+                        );
+                    }
+                }
+                Err(e) => push("The target database is empty", false, e.to_string()),
+            },
+            Err(e) => push("The target database is empty", false, format!("could not connect: {e}")),
         }
     } else {
         match crate::session::connect(&look, password).await {
@@ -1047,6 +1148,22 @@ pub fn restore(
             )));
         }
         let long = Duration::from_secs(6 * 3600);
+        if target.engine == Engine::Mysql {
+            // `source` needs forward slashes, also on Windows.
+            let script = SQL_FILES
+                .iter()
+                .map(|(n, _)| format!("source {}", run_dir.join(n).display().to_string().replace('\\', "/")))
+                .collect::<Vec<_>>()
+                .join(";\n");
+            let mut cmd = ep.command(&pg_tool("mysql", tools.as_deref()));
+            cmd.arg("--batch").arg(&database).arg("-e").arg(script);
+            run(cmd, "mysql", long).await?;
+            return Ok(RestoreReport {
+                database,
+                format,
+                duration: started.elapsed(),
+            });
+        }
         match format {
             BackupFormat::Dump => {
                 let file = manifest

@@ -286,6 +286,41 @@ pub async fn open_stream(t: &KubeTarget) -> Result<DuplexStream> {
     )))
 }
 
+/// A listener on 127.0.0.1 that opens a port-forward stream for every connection it
+/// accepts, for clients that need a host and port (MySQL, pg_dump). It stops when dropped.
+pub struct LocalForward {
+    pub port: u16,
+    task: tokio::task::AbortHandle,
+}
+
+impl Drop for LocalForward {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub async fn local_forward(target: KubeTarget) -> Result<LocalForward> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| CoreError::Connect(format!("local listener: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| CoreError::Connect(format!("local listener: {e}")))?
+        .port();
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let target = target.clone();
+            tokio::spawn(async move {
+                if let Ok(mut stream) = open_stream(&target).await {
+                    let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+                }
+            });
+        }
+    })
+    .abort_handle();
+    Ok(LocalForward { port, task })
+}
+
 /// Database, user and password from the target's secret (or what the config gave).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {

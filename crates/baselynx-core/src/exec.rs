@@ -103,7 +103,8 @@ pub fn execute(session: &Arc<Session>, sql: String, row_cap: Option<usize>) -> m
     runtime::runtime().spawn(async move {
         let result = match session.engine() {
             Engine::Sqlite => crate::engine::sqlite::run(&session, sql, row_cap, tx.clone()).await,
-            Engine::Postgres | Engine::Mysql => run(&session, &sql, row_cap, &tx).await,
+            Engine::Mysql => crate::engine::mysql::run(&session, sql, row_cap, tx.clone()).await,
+            Engine::Postgres => run(&session, &sql, row_cap, &tx).await,
         };
         if let Err(e) = result {
             let _ = tx.send(Err(e)).await;

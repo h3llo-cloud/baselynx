@@ -132,6 +132,9 @@ struct KubeDbSection {
     /// The name shown in baselynx; default `<cluster> · <database name>`.
     #[serde(default)]
     name: Option<String>,
+    /// postgres (default) or mysql.
+    #[serde(default)]
+    engine: Option<Engine>,
     /// The primary's service (a pooler works for browsing; backups prefer the replica).
     #[serde(default)]
     service: Option<String>,
@@ -581,7 +584,11 @@ pub fn parse(text: &str, path: &Path) -> Result<ConfigFile> {
                         "{at}: credentials need a secret, or a database and a user"
                     )));
                 }
-                let port = db.port.unwrap_or(5432);
+                let engine = db.engine.unwrap_or_default();
+                if engine.is_file() {
+                    return Err(CoreError::Invalid(format!("{at}: a SQLite file belongs under servers")));
+                }
+                let port = db.port.unwrap_or(engine.default_port());
                 let target = KubeTarget {
                     cluster: cluster_name.clone(),
                     kubeconfig: kubeconfig.clone(),
@@ -607,6 +614,7 @@ pub fn parse(text: &str, path: &Path) -> Result<ConfigFile> {
                 config.color = color.unwrap_or_else(|| default_color(&cluster_name));
                 config.read_only = db.mode == Some(Mode::ReadOnly);
                 config.kube = Some(target);
+                config.engine = engine;
                 config.config_key = Some(format!("cluster:{cluster_name}/{namespace}/{key}"));
                 config.backup = plan(db.backup, &at)?;
                 config.allow_restore = db.allow_restore;
@@ -1175,6 +1183,23 @@ servers:
     }
 
     #[test]
+    fn mysql_in_kubernetes() {
+        let text = "version: 1\nproject: p\nclusters:\n  c:\n    kubeconfig: k.yaml\n    namespaces:\n      shop:\n        orders:\n          engine: mysql\n          service: orders-mysql\n          credentials: {secret: orders-mysql, keys: {password: mysql-root-password}}\n";
+        let f = parse(text, Path::new("C:/cfg/baselynx.yaml")).unwrap();
+        let c = &f.databases[0].config;
+        assert_eq!(c.engine, Engine::Mysql);
+        assert_eq!(c.port, 3306);
+        assert_eq!(c.kube.as_ref().unwrap().remote_port, 3306);
+        let bad = "version: 1\nproject: p\nclusters:\n  c:\n    kubeconfig: k.yaml\n    namespaces:\n      n:\n        d: {engine: sqlite, service: s, credentials: x}\n";
+        assert!(
+            parse(bad, Path::new("a.yaml"))
+                .unwrap_err()
+                .to_string()
+                .contains("servers")
+        );
+    }
+
+    #[test]
     fn mysql_and_sqlite_servers() {
         let text = "version: 1\nproject: p\nservers:\n  shop: mysql://app:pw@db.example/shop\n  local:\n    url: sqlite:data/app.db\n  keys:\n    engine: mysql\n    host: h\n    database: d\n    user: u\n  file:\n    engine: sqlite\n    database: /abs/x.db\n";
         let f = parse(text, Path::new("C:/cfg/baselynx.yaml")).unwrap();
@@ -1231,7 +1256,7 @@ servers:
             Path::new("/x/baselynx.example.yaml"),
         )
         .unwrap();
-        assert_eq!(f.databases.len(), 6);
+        assert_eq!(f.databases.len(), 8);
         assert!(f.databases.iter().any(|d| d.config.allow_restore));
         assert!(
             f.databases

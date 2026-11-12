@@ -30,6 +30,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The engine-specific connection inside a [`Session`].
 pub(crate) enum Conn {
     Pg { client: Client, tls: MakeRustlsConnect },
+    Mysql(crate::engine::mysql::My),
     Sqlite(Lite),
 }
 
@@ -123,7 +124,7 @@ impl Session {
     pub fn is_closed(&self) -> bool {
         match &self.conn {
             Conn::Pg { client, .. } => client.is_closed(),
-            Conn::Sqlite(_) => false,
+            Conn::Mysql(_) | Conn::Sqlite(_) => false,
         }
     }
 
@@ -131,13 +132,18 @@ impl Session {
     pub fn cancel(self: &Arc<Self>) -> impl Future<Output = Result<()>> + Send + 'static {
         let pg = match &self.conn {
             Conn::Pg { client, tls } => Some((client.cancel_token(), tls.clone())),
+            Conn::Mysql(_) => None,
             Conn::Sqlite(lite) => {
                 lite.interrupt();
                 None
             }
         };
         let kube = self.kube.clone();
+        let mysql = (self.engine == Engine::Mysql).then(|| self.clone());
         runtime::spawn(async move {
+            if let Some(session) = mysql {
+                return crate::engine::mysql::cancel(&session).await;
+            }
             let Some((token, mut tls)) = pg else { return Ok(()) };
             match kube {
                 None => token.cancel_query(tls).await?,
@@ -160,8 +166,10 @@ pub fn connect(
 ) -> impl Future<Output = Result<Arc<Session>>> + Send + 'static {
     let config = config.clone();
     runtime::spawn(async move {
-        if config.engine == Engine::Sqlite {
-            return Ok(Arc::new(crate::engine::sqlite::connect(&config).await?));
+        match config.engine {
+            Engine::Sqlite => return Ok(Arc::new(crate::engine::sqlite::connect(&config).await?)),
+            Engine::Mysql => return Ok(Arc::new(crate::engine::mysql::connect(&config, password).await?)),
+            Engine::Postgres => {}
         }
         let session = connect_any(config.clone(), password).await?;
         if config.read_only {

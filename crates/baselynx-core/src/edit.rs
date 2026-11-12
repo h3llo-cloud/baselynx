@@ -268,8 +268,10 @@ pub fn commit(
     };
     runtime::spawn(async move {
         let planned = planned?;
-        if session.engine() == Engine::Sqlite {
-            return crate::engine::sqlite::commit(&session, planned, report).await;
+        match session.engine() {
+            Engine::Sqlite => return crate::engine::sqlite::commit(&session, planned, report).await,
+            Engine::Mysql => return crate::engine::mysql::commit(&session, planned, report).await,
+            Engine::Postgres => {}
         }
         let client = session.client();
         client.batch_execute("BEGIN").await?;

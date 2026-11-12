@@ -1,8 +1,13 @@
 # baselynx
 
-A fast desktop client for PostgreSQL only, for Windows, macOS and Linux. Rust, with the UI on GPUI through
-[GPUI Kit](https://gpui-kit.com). It starts instantly, connects to plain servers and to databases inside
-Kubernetes (through its own port-forwards), and takes and restores backups.
+A fast desktop client for PostgreSQL, for Windows, macOS and Linux, that also speaks MySQL, MariaDB and
+SQLite. Rust, with the UI on GPUI through [GPUI Kit](https://gpui-kit.com). It starts instantly, connects to
+plain servers and to databases inside Kubernetes (through its own port-forwards), and takes and restores
+backups.
+
+PostgreSQL is the first-class engine: every feature works there first and best. MySQL/MariaDB and SQLite are
+supported: browsing, editing, the console, export, backups and restores all work; a few Postgres-specific
+extras do not (see [Engines](#engines)).
 
 Free software, dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your choice.
 
@@ -31,6 +36,7 @@ Free software, dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-AP
   tab-separated text
 - One config file, `baselynx.yaml`, for Kubernetes and plain databases, opened at start; scheduled backups
   (dump or SQL) and guarded restores
+- PostgreSQL first; MySQL, MariaDB and SQLite files too, side by side in the same project
 - Ctrl+K jumps to any table of any connected database, a row (`customers 42`), a recent query (`>`), or a
   command
 
@@ -105,7 +111,12 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The integration tests in `crates/baselynx-core/tests` need a PostgreSQL server:
+The SQLite tests need nothing. The MySQL/MariaDB tests in `crates/baselynx-core/tests/mysql.rs` run only with
+`BASELYNX_TEST_MYSQL_DSN=mysql://root:password@127.0.0.1:3306/` (a user who may create databases); their backup
+test also needs `mysqldump` and `mysql`, on PATH or in `BASELYNX_TEST_MYSQL_TOOLS`. Without the variable they
+pass without connecting.
+
+The other integration tests in `crates/baselynx-core/tests` need a PostgreSQL server:
 
 - With `BASELYNX_TEST_DSN=postgres://user:password@host:5432/postgres` they use that server. The role must be
   allowed to create databases.
@@ -121,6 +132,27 @@ That feature only resolves with two exact pins, kept in `Cargo.lock`: `taffy 0.1
 while `gpui-pre` would take 0.15.1) and `unicode-properties 0.1.3` (`gpui-fast-web` asks for `=0.1.3`). A
 `cargo update` that moves either breaks `cargo test`; restore them with
 `cargo update -p taffy --precise 0.15.0` and `cargo update -p unicode-properties --precise 0.1.3`.
+
+## Engines
+
+| | PostgreSQL | MySQL / MariaDB | SQLite |
+|---|---|---|---|
+| Connect | servers, Kubernetes | servers, Kubernetes | a file on disk |
+| Browse, filter, sort, page, count | yes | yes | yes |
+| Edit rows, commit in one transaction | yes | yes (InnoDB) | yes |
+| Console, completion, history, cancel | yes | yes (`KILL QUERY`) | yes |
+| Error underlined where the server points | at the character | — (MySQL gives a line, not a position) | at the character, when SQLite says |
+| Guarded writes (commit or roll back) | yes | yes, but schema changes commit at once | yes |
+| Read-only mode | yes, through the replica | yes, through the replica | the file opened read-only |
+| Column statistics (the glance card) | yes | — | — |
+| Pooler detection (PgBouncer) | yes | — | — |
+| Backups | `dump` and `sql`, with pg_dump | `sql`, with mysqldump | a file copy and `sql`, no tools needed |
+| Restores | one transaction | not all-or-nothing (schema changes commit at once) | one transaction |
+
+**Servers that speak the PostgreSQL protocol** (TimescaleDB, Supabase, Neon, AlloyDB, Amazon RDS and Aurora
+PostgreSQL) are PostgreSQL underneath and work as PostgreSQL. CockroachDB and YugabyteDB also speak it, but
+their catalogs differ in places; browsing and the console should work, editing may not. We have not tested
+these ourselves yet: reports welcome.
 
 ## The config file
 
@@ -145,6 +177,8 @@ clusters:
           backup: {every: 24h, formats: [dump, sql]}
 servers:
   analytics: postgres://report:secret@db.example.com/analytics?sslmode=require
+  legacy-crm: mysql://app:secret@crm.example.com:3306/crm
+  notes: sqlite:data/notes.db              # relative to this file
   local:
     host: 127.0.0.1
     database: shop
@@ -152,8 +186,9 @@ servers:
     allow_restore: true
 ```
 
-- **Plain servers** are a connection string, or keys (`url` plus overrides, or `host`, `port`, `database`,
-  `user`, `ssl`). A password in the file, plain text, is used as it is and kept only in memory; without one
+- **Plain servers** are a connection string (`postgres://`, `mysql://`, `mariadb://` or `sqlite:`), or keys
+  (`url` plus overrides, or `engine`, `host`, `port`, `database`, `user`, `ssl`). For SQLite, `database` is
+  the file's path, relative to the config file; a missing file is an error, never a new empty database. A password in the file, plain text, is used as it is and kept only in memory; without one
   baselynx asks once and keeps the answer in the system keyring.
 - **Editing it.** File → **Edit config file** opens the project's file in an editor that checks it as you
   type and names the line of a mistake. **Save and reload** writes only a file baselynx can read, keeps the
@@ -183,11 +218,13 @@ password saved in the keyring, and ones whose password was typed earlier in the 
 
 A database with `backup:` in the config file is backed up when baselynx starts, if its last backup is older
 than `every` (so never more often than that). **Back up now** in a connection's context menu works for any
-connection. Backups run one at a time, in the background, with pg_dump from `backups.tools`, PATH, or the
-newest PostgreSQL installation on Windows.
+connection. Backups run one at a time, in the background: pg_dump for PostgreSQL and mysqldump for
+MySQL/MariaDB (from `backups.tools`, PATH, or on Windows the newest PostgreSQL installation), and SQLite's own
+backup API for SQLite files, which needs no tools.
 
-- Formats: `dump` (`<database>.dump`, pg_dump's compressed custom format) and `sql` (`schema.sql`, `data.sql`,
-  `indexes.sql`: plain SQL, readable, in the order a restore runs them).
+- Formats: `dump` (`<database>.dump`, pg_dump's compressed custom format; for SQLite, `<name>.sqlite`, a
+  consistent copy of the file) and `sql` (`schema.sql`, `data.sql`, `indexes.sql`: plain SQL, readable, in the
+  order a restore runs them). MySQL backups are always `sql`; `indexes.sql` holds its triggers.
 - Each backup is a folder `<directory>/<cluster>/<namespace>/<name>/<UTC time>/` (`servers/<name>/…` for a
   plain server) with a `manifest.json`: source, database, versions and a SHA-256 for every file. It is
   written as `….partial` and renamed when complete; a dump is checked with `pg_restore --list` first.
@@ -211,14 +248,18 @@ the backup's folder (its `manifest.json`), then shows what goes where and every 
 1. the config file has `allow_restore: true` for this connection (the menu item is greyed out otherwise);
 2. the connection is read-write;
 3. the backup is complete and unchanged: every file is there and matches its checksum;
-4. pg_restore or psql runs;
-5. the target database is empty: no tables, views, sequences, schemas besides `public`, or functions.
+4. the backup comes from the same kind of database (a PostgreSQL backup never goes into MySQL);
+5. pg_restore, psql or mysql runs (SQLite needs none);
+6. the target database is empty: no tables, views, sequences, schemas besides `public`, or functions (for
+   SQLite, the file holds no tables; for MySQL, the database holds no tables, routines or events).
 
 Only when every check passes can you type the database's name and press **Restore**. A backup taken from
 another database is flagged. baselynx checks everything again before it writes, restores into the primary
 (never the replica), and runs the whole restore in one transaction (`pg_restore --single-transaction
 --exit-on-error --no-owner`, or `psql --single-transaction -v ON_ERROR_STOP=1`), so a failed restore leaves
-the database empty.
+the database empty. SQLite restores are atomic too. MySQL commits schema changes as it goes, so a MySQL
+restore that fails part-way leaves what it created: the dialog says so, and the target must be empty, so drop
+it and try again.
 
 ## Menus
 

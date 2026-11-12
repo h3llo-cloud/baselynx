@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio_postgres::types::Type;
 
-use crate::engine::sqlite;
+use crate::engine::{mysql, sqlite};
 use crate::error::Result;
 use crate::model::Engine;
 use crate::runtime;
@@ -159,6 +159,9 @@ pub fn list_schemas(session: &Arc<Session>) -> impl Future<Output = Result<Vec<S
         if session.engine() == Engine::Sqlite {
             return sqlite::list_schemas(&session).await;
         }
+        if session.engine() == Engine::Mysql {
+            return mysql::list_schemas(&session).await;
+        }
         let sql = format!(
             "SELECT n.nspname::text, (n.nspname IN ('pg_catalog', 'information_schema')) AS system \
              FROM pg_catalog.pg_namespace n WHERE {SYSTEM_FILTER} ORDER BY 2, 1"
@@ -184,6 +187,9 @@ pub fn list_relations(
         if session.engine() == Engine::Sqlite {
             return sqlite::list_relations(&session, schema).await;
         }
+        if session.engine() == Engine::Mysql {
+            return mysql::list_relations(&session, schema).await;
+        }
         let sql = format!(
             "SELECT n.nspname::text, c.relname::text, c.relkind::text, c.reltuples::float8, {PRIMARY_KEY_COLS} \
              FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -201,6 +207,9 @@ pub fn list_all_relations(session: &Arc<Session>) -> impl Future<Output = Result
     runtime::spawn(async move {
         if session.engine() == Engine::Sqlite {
             return sqlite::list_all_relations(&session).await;
+        }
+        if session.engine() == Engine::Mysql {
+            return mysql::list_all_relations(&session).await;
         }
         let sql = format!(
             "SELECT n.nspname::text, c.relname::text, c.relkind::text, c.reltuples::float8, {PRIMARY_KEY_COLS} \
@@ -237,6 +246,9 @@ pub fn list_columns(
     runtime::spawn(async move {
         if session.engine() == Engine::Sqlite {
             return sqlite::list_columns(&session, schema, name).await;
+        }
+        if session.engine() == Engine::Mysql {
+            return mysql::list_columns(&session, schema, name).await;
         }
         let rows = session
             .client()
@@ -317,6 +329,9 @@ pub fn column_stats(
         if session.engine() == Engine::Sqlite {
             return Ok(None);
         }
+        if session.engine() == Engine::Mysql {
+            return Ok(None);
+        }
         let rows = session
             .client()
             .query_typed(
@@ -370,6 +385,9 @@ pub fn describe_relation(
     runtime::spawn(async move {
         if session.engine() == Engine::Sqlite {
             return sqlite::describe_relation(&session, schema, name).await;
+        }
+        if session.engine() == Engine::Mysql {
+            return mysql::describe_relation(&session, schema, name).await;
         }
         let client = session.client();
         let rel = client

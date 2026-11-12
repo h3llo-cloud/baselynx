@@ -30,6 +30,7 @@ clusters:
     namespaces:                           # Kubernetes namespace → databases in it
       billing:
         orders-db:                        # shown as "shop-prod · orders-db"
+          # engine: mysql                 # postgres (default) or mysql; the port then defaults to 3306
           service: orders-db-rw           # the primary's service (or `pod: orders-db-0`)
           replica: orders-db-ro           # read-only mode and backups use the replicas
           # port: 5432                    # the service port; default 5432
@@ -71,6 +72,8 @@ clusters:
 # asks once and keeps the answer in the system keyring.
 servers:
   analytics: postgres://report:not-a-real-password@db.example.com:5432/analytics?sslmode=require
+  legacy-crm: mysql://app:not-a-real-password@crm.example.com:3306/crm   # MySQL or MariaDB
+  notes: sqlite:data/notes.db         # a SQLite file, relative to this file; never created if missing
   staging:
     url: postgresql://shop@staging.example.com/shop
     password: not-a-real-password # overrides the string's parts, like every key below
