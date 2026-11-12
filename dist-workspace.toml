@@ -19,16 +19,11 @@ allow-dirty = ["msi"]
 # %USERPROFILE%\.local\bin on Windows; the MSI installs to Program Files.
 install-path = ["$XDG_BIN_HOME/", "~/.local/bin"]
 
-# GPUI's system libraries on the Linux build machines (the README's Linux build list)
+# GPUI's system libraries on the Linux build machines: keyboard (xkbcommon, with X11), Wayland,
+# fonts. Keep versionless names: dist cuts a name at its first dot (libwebkit2gtk-4.1-dev broke).
 [dist.dependencies.apt]
-clang = "*"
 libfontconfig-dev = "*"
 libfreetype-dev = "*"
 libwayland-dev = "*"
-libwebkit2gtk-4.1-dev = "*"
 libxkbcommon-dev = "*"
 libxkbcommon-x11-dev = "*"
-libx11-xcb-dev = "*"
-libssl-dev = "*"
-libzstd-dev = "*"
-libasound2-dev = "*"

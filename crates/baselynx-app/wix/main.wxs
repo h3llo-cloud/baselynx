@@ -86,7 +86,24 @@
         <Property Id='DiskPrompt' Value='baselynx Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
-            <Directory Id='ProgramMenuFolder'/>
+            <!-- baselynx edit: a Start menu entry, removed with the program -->
+            <Directory Id='ProgramMenuFolder'>
+                <Component Id='StartMenuShortcut' Guid='7D3F0A52-6C1B-4E8A-9B47-2F5E1C9D8A31'>
+                    <Shortcut
+                        Id='StartMenuShortcut'
+                        Name='baselynx'
+                        Description='Desktop client for PostgreSQL, MySQL and SQLite'
+                        Target='[Bin]baselynx.exe'
+                        WorkingDirectory='Bin'/>
+                    <RegistryValue
+                        Root='HKCU'
+                        Key='Software\h3llo.cloud\baselynx'
+                        Name='StartMenuShortcut'
+                        Type='integer'
+                        Value='1'
+                        KeyPath='yes'/>
+                </Component>
+            </Directory>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='baselynx'>
                     
@@ -127,16 +144,7 @@
                                 Name='baselynx.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\baselynx.exe'
-                                KeyPath='yes'>
-                                <!-- baselynx edit: a Start menu entry, removed with the program -->
-                                <Shortcut
-                                    Id='StartMenuShortcut'
-                                    Directory='ProgramMenuFolder'
-                                    Name='baselynx'
-                                    Description='Desktop client for PostgreSQL, MySQL and SQLite'
-                                    WorkingDirectory='Bin'
-                                    Advertise='no'/>
-                            </File>
+                                KeyPath='yes'/>
                         </Component>
                     </Directory>
                 </Directory>
@@ -160,6 +168,7 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='StartMenuShortcut'/>
 
             <Feature
                 Id='Environment'
