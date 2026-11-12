@@ -1,6 +1,6 @@
 # baselynx
 
-> baselynx is a fast desktop client for PostgreSQL that also speaks MySQL/MariaDB and SQLite (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain servers, SQLite files and databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups. Its databases come from one YAML file, `baselynx.yaml`. PostgreSQL is the first-class engine; the README's "Engines" table lists what the others lack. Licence: MIT OR Apache-2.0.
+> baselynx is a fast desktop client for PostgreSQL that also speaks MySQL/MariaDB and SQLite (Windows, macOS, Linux), written in Rust with the UI on GPUI through GPUI Kit. It connects to plain servers, SQLite files and databases inside Kubernetes (it opens its own port-forwards), edits tables, runs SQL, and takes and restores backups. Its databases come from one YAML file, `baselynx.yaml`. PostgreSQL is the first-class engine; the README's "Engines" table lists what the others lack. Licence: Apache-2.0.
 
 This file tells a coding agent how to build, run and test baselynx on each system, and how to write its config file. Facts here match the code in this repository; when in doubt, read `baselynx.example.yaml` and `crates/baselynx-core/src/config.rs`.
 

@@ -9,7 +9,7 @@ PostgreSQL is the first-class engine: every feature works there first and best. 
 supported: browsing, editing, the console, export, backups and restores all work; a few Postgres-specific
 extras do not (see [Engines](#engines)).
 
-Free software, dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your choice.
+Free software under the [Apache License 2.0](LICENSE).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
@@ -340,8 +340,8 @@ stopping it, start it again with
 
 ## Licence
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE), at your option. Unless you
-say otherwise, any contribution you submit for inclusion is dual-licensed the same way, without additional
-terms. Binaries you build also contain the dependencies, under their own licences: baselynx's dependencies are under MIT, BSD, Apache-2.0, ISC, Zlib, Unicode or the PostgreSQL
-licence. GPUI's font stack brings in three MPL-2.0 crates (`dwrote`, `option-ext`, and `cbindgen` as a macOS
+Licensed under the [Apache License 2.0](LICENSE). Unless you say otherwise, any contribution you submit for
+inclusion is licensed the same way, without additional terms (section 5 of the licence). Binaries you build also
+contain the dependencies, under their own licences: baselynx's dependencies are under MIT, BSD, Apache-2.0, ISC,
+Zlib, Unicode or the PostgreSQL licence. GPUI's font stack brings in three MPL-2.0 crates (`dwrote`, `option-ext`, and `cbindgen` as a macOS
 build tool); MPL-2.0 is file-level copyleft and applies to those crates only.
