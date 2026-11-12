@@ -1,0 +1,2 @@
+// Icon 1 is the one GPUI loads (LoadImageW with id 1) and Windows shows for the executable.
+1 ICON "icons/baselynx.ico"

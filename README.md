@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="baselynx logo: a database with lynx ears" width="128" align="right">
+
 # baselynx
 
 A fast desktop client for PostgreSQL, for Windows, macOS and Linux, that also speaks MySQL, MariaDB and
@@ -310,6 +312,7 @@ to the binary is not opened, unless `BASELYNX_CONFIG_FILE` names one), and `BASE
 ```
 crates/baselynx-core   database, storage and export; no UI dependency
 crates/baselynx-app    the GPUI Kit application
+crates/baselynx-app/icons  the app icon: edit baselynx.svg, then run render.py for the .png and .ico
 fixtures/seed.sql      test data
 baselynx.example.yaml  every config key, with comments
 ```

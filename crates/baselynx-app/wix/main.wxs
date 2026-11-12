@@ -189,8 +189,9 @@
           The product icon is the graphic that appears in the Add/Remove
           Programs control panel for the application.
         -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
-        <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
+        <!-- baselynx edit: the app icon in Installed apps -->
+        <Icon Id='ProductICO' SourceFile='icons\baselynx.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
         <Property Id='ARPHELPLINK' Value='https://github.com/h3llo-cloud/baselynx'/>
         

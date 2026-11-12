@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod actions;
+mod app_icon;
 mod app_state;
 mod assets;
 mod completion;
@@ -43,6 +44,7 @@ fn main() {
     baselynx_core::runtime::runtime();
     gpui_kit::application().with_assets(assets::AppAssets).run(|cx| {
         gpui_kit::init(cx);
+        app_icon::install();
         actions::bind(cx);
         ui::palette::bind(cx);
         ui::workspace::menu_paste::bind(cx);
@@ -65,7 +67,7 @@ fn main() {
         // One title row: the toolkit's title bar draws the window buttons beside baselynx's own
         // controls.
         let base = gpui_kit::component::TitleBar::window_options();
-        let options = WindowOptions {
+        let mut options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
@@ -75,6 +77,7 @@ fn main() {
             window_min_size: Some(size(px(720.), px(420.))),
             ..base
         };
+        app_icon::apply(&mut options);
         gpui_kit::open_window(options, cx, |window, cx| {
             window.set_window_title(APP_NAME);
             cx.new(|cx| Workspace::new(store, Arc::new(KeyringStore), startup_config(), window, cx))

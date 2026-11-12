@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- baselynx: a database (three discs) whose top disc wears a lynx's tufted ears -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2F6DF2"/>
+      <stop offset="1" stop-color="#1E4FD6"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <g transform="translate(0 46)" fill="#FFFFFF">
+    <!-- ears, each ending in a thin tuft -->
+    <path d="M314 424 L350 236 L356 132 L384 228 L474 362 Z"/>
+    <path d="M710 424 L674 236 L668 132 L640 228 L550 362 Z"/>
+    <!-- three discs -->
+    <ellipse cx="512" cy="424" rx="218" ry="80"/>
+    <path d="M294 496 A218 80 0 0 0 730 496 L730 556 A218 80 0 0 1 294 556 Z"/>
+    <path d="M294 616 A218 80 0 0 0 730 616 L730 676 A218 80 0 0 1 294 676 Z"/>
+    <!-- slanted eyes on the top disc -->
+    <path d="M394 414 Q440 386 478 424 Q432 436 394 414 Z" fill="#1E4FD6"/>
+    <path d="M630 414 Q584 386 546 424 Q592 436 630 414 Z" fill="#1E4FD6"/>
+  </g>
+</svg>
