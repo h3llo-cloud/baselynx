@@ -331,6 +331,9 @@ Theme and zoom are remembered.
 | | Ctrl+Shift+K | Filter the sidebar's tables |
 | | Alt+[, Alt+] | Back and forward through tables reached by following keys |
 | | Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+1…9 | Close, next, previous, nth tab |
+| | Ctrl+Shift+T | Reopen the last closed tab (its filter, sort or text come back) |
+| Tab strip | Right-click a tab | Close others, to the right, all, unchanged, or all of its connection; reopen; open in console, copy table name, reveal in sidebar, duplicate console |
+| | Middle-click a tab | Close it |
 | | Ctrl+=, Ctrl+-, Ctrl+0 | Zoom in, out, back to 100 % |
 | Console | Ctrl+Enter | Run the statement at the caret or the selection |
 | | Ctrl+Shift+Enter | Run all |

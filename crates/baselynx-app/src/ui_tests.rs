@@ -179,3 +179,86 @@ fn table_tab_edits_and_pages(cx: &mut TestAppContext) {
         table.read(cx).page_number() == 1 && table.read(cx).loaded_rows(cx) == 100
     });
 }
+
+/// Four console tabs on a SQLite file (an empty file is an empty database, so no server).
+fn console_project(store: &Store, dir: &std::path::Path) -> Vec<Uuid> {
+    let path = dir.join("tabs.db");
+    std::fs::write(&path, b"").unwrap();
+    let mut conn = ConnectionConfig::new("notes");
+    conn.engine = baselynx_core::model::Engine::Sqlite;
+    conn.database = path.to_string_lossy().into_owned();
+    let mut p = Project::new("Tabs test");
+    let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        p.tabs.push(TabState::Console {
+            id: *id,
+            connection: conn.id,
+            title: format!("console {}", i + 1),
+            text: format!("select {};", i + 1),
+        });
+    }
+    p.active_tab = Some(ids[0]);
+    p.connections.push(conn);
+    store.save_project(&p).unwrap();
+    ids
+}
+
+fn tab_ids(ws: &Entity<Workspace>, cx: &App) -> Vec<Uuid> {
+    ws.read(cx).tabs.iter().map(|t| t.id(cx)).collect()
+}
+
+#[gpui_kit::test]
+fn tab_menu_closes_others_and_reopens(cx: &mut TestAppContext) {
+    init(cx);
+    // The SQLite connection connects on the core runtime, outside the test scheduler.
+    cx.executor().allow_parking();
+    let (dir, store) = temp_store();
+    let ids = console_project(&store, dir.path());
+    let (w, ws) = open(cx, store, Arc::new(MemorySecretStore::default()));
+    wait_until(cx, w, "the four tabs", |cx| ws.read(cx).tabs.len() == 4);
+
+    // Right-click the second tab (on its close button: tabs themselves are not registered for
+    // tests; the click reaches the tab all the same). Item 1 is "Close others".
+    frame(cx, w, |window, cx| {
+        window.render_frame(cx);
+        window.right_click(("close-tab", 1usize), cx);
+    });
+    cx.run_until_parked();
+    frame(cx, w, |window, cx| {
+        window.render_frame(cx);
+        window.within("popup-menu").click(1usize, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(tab_ids(&ws, cx), vec![ids[1]], "only the clicked tab stays");
+        assert_eq!(ws.read(cx).active, Some(0), "and it is active");
+    });
+
+    // Ctrl+Shift+T brings the closed tabs back, the last closed first, with their text.
+    frame(cx, w, |window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-t", cx);
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let ws_ = ws.read(cx);
+        assert_eq!(tab_ids(&ws, cx), vec![ids[1], ids[3]]);
+        assert_eq!(ws_.active, Some(1), "the reopened tab is active");
+        match ws_.tabs[1].state(cx) {
+            TabState::Console { text, .. } => assert_eq!(text, "select 4;"),
+            other => panic!("a console comes back, not {other:?}"),
+        }
+    });
+
+    // Middle-click closes a tab.
+    frame(cx, w, |window, cx| {
+        window.render_frame(cx);
+        window.click_with_options(
+            ("close-tab", 0usize),
+            gpui_kit::test::ClickOptions::new().with_button(gpui_kit::MouseButton::Middle),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(tab_ids(&ws, cx), vec![ids[3]]));
+}

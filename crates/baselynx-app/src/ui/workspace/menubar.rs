@@ -85,6 +85,7 @@ impl Workspace {
                     .separator()
                     .menu_with_disabled("Export…", Box::new(ExportData), !st.can_export)
                     .menu_with_disabled("Close tab", Box::new(CloseTab), n_tabs == 0)
+                    .menu("Reopen closed tab", Box::new(ReopenClosedTab))
                     .separator()
                     .menu("Quit", Box::new(Quit)),
                 1 => m

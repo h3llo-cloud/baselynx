@@ -16,6 +16,7 @@ actions!(
         NewConsole,
         ToggleSidebar,
         CloseTab,
+        ReopenClosedTab,
         NextTab,
         PrevTab,
         ActivateTab1,
@@ -111,6 +112,7 @@ pub fn bind(cx: &mut App) {
         key("secondary-t", NewConsole, None, cx),
         key("secondary-b", ToggleSidebar, None, cx),
         key("secondary-w", CloseTab, None, cx),
+        key("secondary-shift-t", ReopenClosedTab, None, cx),
         key("ctrl-tab", NextTab, None, cx),
         key("ctrl-shift-tab", PrevTab, None, cx),
         key("secondary-1", ActivateTab1, None, cx),
@@ -143,6 +145,7 @@ pub fn bind(cx: &mut App) {
         key("secondary-7", ActivateTab7, Some("Input"), cx),
         key("secondary-8", ActivateTab8, Some("Input"), cx),
         key("secondary-9", ActivateTab9, Some("Input"), cx),
+        key("secondary-shift-t", ReopenClosedTab, Some("Input"), cx),
         key("ctrl-tab", NextTab, Some("Input"), cx),
         key("ctrl-shift-tab", PrevTab, Some("Input"), cx),
         // record panel and keys (3.3, 3.4)

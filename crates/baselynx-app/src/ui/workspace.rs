@@ -38,6 +38,7 @@ mod backups_view;
 mod config_editor;
 mod menubar;
 mod sidebar;
+mod tab_menu;
 
 use sidebar::SideState;
 
@@ -251,6 +252,8 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
     tab_subs: HashMap<Uuid, Subscription>,
+    /// Tabs closed in this project, newest last, for "Reopen closed tab".
+    closed: Vec<TabState>,
     /// Connections started together by `connect_all`, for the status bar summary (D10).
     connect_batch: Option<ConnectBatch>,
     side: SideState,
@@ -348,6 +351,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             tab_subs: HashMap::new(),
+            closed: Vec::new(),
             connect_batch: None,
             side,
             trail: Vec::new(),
@@ -407,6 +411,7 @@ impl Workspace {
         self.conns.clear();
         self.tabs.clear();
         self.tab_subs.clear();
+        self.closed.clear();
         self.active = None;
         self.recent.clear();
         self.console_counter = 0;
@@ -1679,6 +1684,10 @@ impl Workspace {
             return;
         }
         let tab = self.tabs.remove(ix);
+        self.closed.push(tab.state(cx));
+        if self.closed.len() > tab_menu::CLOSED_KEPT {
+            self.closed.remove(0);
+        }
         tab.close(cx);
         self.tab_subs.remove(&tab.id(cx));
         self.active = match self.active {
@@ -1749,7 +1758,7 @@ impl Workspace {
                 title: t.tooltip(cx),
             });
         }
-        let commands: [(&str, ActionFactory); 21] = [
+        let commands: [(&str, ActionFactory); 22] = [
             ("New console", || Box::new(NewConsole)),
             ("Add connection", || Box::new(AddConnection)),
             ("Open config file", || Box::new(OpenConfig)),
@@ -1762,6 +1771,7 @@ impl Workspace {
             ("Discard changes", || Box::new(DiscardChanges)),
             ("Export", || Box::new(ExportData)),
             ("Toggle sidebar", || Box::new(ToggleSidebar)),
+            ("Reopen closed tab", || Box::new(ReopenClosedTab)),
             ("Close tab", || Box::new(CloseTab)),
             ("New project", || Box::new(NewProject)),
             ("Count rows", || Box::new(CountRows)),
@@ -2081,6 +2091,14 @@ impl Workspace {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| this.activate(ix, window, cx)))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| this.close_tab(ix, window, cx)),
+                    )
+                    .context_menu({
+                        let weak = cx.weak_entity();
+                        move |menu: PopupMenu, _, cx| tab_menu::tab_menu(menu, weak.clone(), ix, cx)
+                    })
                     .child(match t {
                         TabView::Console(_) => Icon::new(IconName::SquareTerminal).xsmall(),
                         TabView::Table(_) => Icon::new(gpui_kit::assets::IconName::Table).xsmall(),
@@ -2326,6 +2344,9 @@ impl Render for Workspace {
                 if let Some(a) = this.active {
                     this.close_tab(a, window, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
+                this.reopen_closed_tab(window, cx)
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
                 if let Some(a) = this.active {

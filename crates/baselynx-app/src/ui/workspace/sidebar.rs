@@ -335,7 +335,7 @@ impl Workspace {
 
     // ------------------------------------------------------------------ keyboard
 
-    fn side_select(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(super) fn side_select(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.side.rows.len() {
             self.side.selected = Some(ix);
             self.side.scroll.scroll_to_item(ix, ScrollStrategy::Center);
