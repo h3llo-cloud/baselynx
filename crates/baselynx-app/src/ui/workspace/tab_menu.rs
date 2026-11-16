@@ -10,7 +10,13 @@ impl Workspace {
     /// Closes the tabs with these ids. Tabs with uncommitted changes are listed in one
     /// confirmation for the lot; without any, they close at once. `then` is activated
     /// afterwards when it is still open (the tab the menu was opened on).
-    pub(super) fn close_tabs(&mut self, ids: Vec<Uuid>, then: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_tabs(
+        &mut self,
+        ids: Vec<Uuid>,
+        then: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ids.is_empty() {
             return;
         }
@@ -32,7 +38,10 @@ impl Workspace {
         let description = match dirty.len() {
             _ if ids.len() == 1 => "The changes are discarded.".to_string(),
             1 => format!("{} has uncommitted changes; they are discarded.", dirty[0]),
-            n => format!("{n} of them have uncommitted changes ({}); they are discarded.", dirty.join(", ")),
+            n => format!(
+                "{n} of them have uncommitted changes ({}); they are discarded.",
+                dirty.join(", ")
+            ),
         };
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (weak, ids) = (weak.clone(), ids.clone());
@@ -68,7 +77,12 @@ impl Workspace {
     /// page size (a table) or its text (a console). A table already open again is activated.
     pub(super) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(st) = self.closed.pop() else { return };
-        if let TabState::Table { connection, schema, table, .. } = &st
+        if let TabState::Table {
+            connection,
+            schema,
+            table,
+            ..
+        } = &st
             && let Some(ix) = self.tabs.iter().position(|t| match t {
                 TabView::Table(v) => {
                     let v = v.read(cx);
@@ -113,7 +127,10 @@ impl Workspace {
         rt.expanded = true;
         rt.expanded_schemas.insert(schema.clone());
         let si = rt.schemas.iter().position(|s| s.name == schema);
-        let ri = rt.relations.get(&schema).and_then(|r| r.iter().position(|r| r.name == table));
+        let ri = rt
+            .relations
+            .get(&schema)
+            .and_then(|r| r.iter().position(|r| r.name == table));
         self.side_reveal(conn, cx);
         let target = match (si, ri) {
             (Some(si), Some(ri)) => Some(sidebar::Row::Rel(conn, si, ri)),
@@ -140,9 +157,18 @@ pub(super) fn tab_menu(menu: PopupMenu, weak: WeakEntity<Workspace>, ix: usize, 
     let others: Vec<Uuid> = ids.iter().copied().filter(|t| *t != id).collect();
     let right: Vec<Uuid> = ids[ix + 1..].to_vec();
     let unchanged: Vec<Uuid> = ws.tabs.iter().filter(|t| !t.is_dirty(cx)).map(|t| t.id(cx)).collect();
-    let same_conn: Vec<Uuid> = ws.tabs.iter().filter(|t| t.connection(cx) == conn).map(|t| t.id(cx)).collect();
+    let same_conn: Vec<Uuid> = ws
+        .tabs
+        .iter()
+        .filter(|t| t.connection(cx) == conn)
+        .map(|t| t.id(cx))
+        .collect();
     let conn_name = ws.project.connection(conn).map(|c| c.name.clone()).unwrap_or_default();
-    let dialect = ws.project.connection(conn).map(|c| c.engine.dialect()).unwrap_or_default();
+    let dialect = ws
+        .project
+        .connection(conn)
+        .map(|c| c.engine.dialect())
+        .unwrap_or_default();
     let can_reopen = !ws.closed.is_empty();
     let table = match tab {
         TabView::Table(v) => {
@@ -170,7 +196,9 @@ pub(super) fn tab_menu(menu: PopupMenu, weak: WeakEntity<Workspace>, ix: usize, 
         let n = set.len();
         PopupMenuItem::new(label)
             .disabled(n == 0)
-            .on_click(on(Box::new(move |this, window, cx| this.close_tabs(set.clone(), then, window, cx))))
+            .on_click(on(Box::new(move |this, window, cx| {
+                this.close_tabs(set.clone(), then, window, cx)
+            })))
     };
 
     let mut menu = menu
@@ -192,27 +220,35 @@ pub(super) fn tab_menu(menu: PopupMenu, weak: WeakEntity<Workspace>, ix: usize, 
         let sql = format!("SELECT * FROM {} LIMIT 100;", dialect.qualified(&schema, &name));
         let qualified = dialect.qualified(&schema, &name);
         menu = menu
-            .item(PopupMenuItem::new("Open in console").on_click(on(Box::new(move |this, window, cx| {
-                this.open_console(conn, Some(sql.clone()), window, cx)
-            }))))
+            .item(
+                PopupMenuItem::new("Open in console").on_click(on(Box::new(move |this, window, cx| {
+                    this.open_console(conn, Some(sql.clone()), window, cx)
+                }))),
+            )
             .item(PopupMenuItem::new("Copy table name").on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(qualified.clone()));
             }))
-            .item(PopupMenuItem::new("Reveal in sidebar").on_click(on(Box::new(move |this, _, cx| {
-                if let Some(ix) = this.tabs.iter().position(|t| t.id(cx) == id) {
-                    this.reveal_tab(ix, cx);
-                }
-            }))));
+            .item(
+                PopupMenuItem::new("Reveal in sidebar").on_click(on(Box::new(move |this, _, cx| {
+                    if let Some(ix) = this.tabs.iter().position(|t| t.id(cx) == id) {
+                        this.reveal_tab(ix, cx);
+                    }
+                }))),
+            );
     } else {
         menu = menu
-            .item(PopupMenuItem::new("Duplicate console").on_click(on(Box::new(move |this, window, cx| {
-                this.open_console(conn, console_text.clone(), window, cx)
-            }))))
-            .item(PopupMenuItem::new("Reveal connection in sidebar").on_click(on(Box::new(move |this, _, cx| {
-                if let Some(ix) = this.tabs.iter().position(|t| t.id(cx) == id) {
-                    this.reveal_tab(ix, cx);
-                }
-            }))));
+            .item(
+                PopupMenuItem::new("Duplicate console").on_click(on(Box::new(move |this, window, cx| {
+                    this.open_console(conn, console_text.clone(), window, cx)
+                }))),
+            )
+            .item(
+                PopupMenuItem::new("Reveal connection in sidebar").on_click(on(Box::new(move |this, _, cx| {
+                    if let Some(ix) = this.tabs.iter().position(|t| t.id(cx) == id) {
+                        this.reveal_tab(ix, cx);
+                    }
+                }))),
+            );
     }
     menu
 }

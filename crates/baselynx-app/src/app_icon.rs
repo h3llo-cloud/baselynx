@@ -35,7 +35,9 @@ fn dock_icon() {
     use objc2_foundation::NSData;
     let Some(mtm) = MainThreadMarker::new() else { return };
     let data = NSData::with_bytes(PNG);
-    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else { return };
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
     #[allow(unused_unsafe)]
     unsafe {
         NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image))

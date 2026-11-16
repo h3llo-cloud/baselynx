@@ -58,15 +58,17 @@ impl From<mysql_async::Error> for CoreError {
             mysql_async::Error::Io(e) => CoreError::Connect(e.to_string()),
             // After a wrong password, MariaDB on Windows offers Windows authentication
             // (GSSAPI) next, which the driver does not speak: report it as refused login.
-            mysql_async::Error::Driver(mysql_async::DriverError::UnknownAuthPlugin { name }) => CoreError::Db(DbError {
-                message: format!(
-                    "access denied: the server asked for the {name} plugin, which baselynx does not support;                      check the password, or use an account with mysql_native_password or caching_sha2_password"
-                ),
-                code: "1045".into(),
-                detail: None,
-                hint: None,
-                position: None,
-            }),
+            mysql_async::Error::Driver(mysql_async::DriverError::UnknownAuthPlugin { name }) => {
+                CoreError::Db(DbError {
+                    message: format!(
+                        "access denied: the server asked for the {name} plugin, which baselynx does not support;                      check the password, or use an account with mysql_native_password or caching_sha2_password"
+                    ),
+                    code: "1045".into(),
+                    detail: None,
+                    hint: None,
+                    position: None,
+                })
+            }
             mysql_async::Error::Driver(e) => {
                 if matches!(e, mysql_async::DriverError::ConnectionClosed) {
                     CoreError::Closed
