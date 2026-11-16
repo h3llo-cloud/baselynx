@@ -84,6 +84,17 @@ pub fn install(pref: ThemePref, zoom: f32, cx: &mut App) {
     Theme::global_mut(cx).notification.placement = Anchor::BottomRight;
 }
 
+/// For an application that embeds the workspace (`crate::embed`): baselynx's sizes at 100 %,
+/// without touching the host's theme. Does nothing when `install` ran.
+pub fn install_embedded(cx: &mut App) {
+    if !cx.has_global::<Appearance>() {
+        cx.set_global(Appearance {
+            pref: ThemePref::System,
+            zoom: 1.0,
+        });
+    }
+}
+
 fn clamp_zoom(z: f32) -> f32 {
     if z.is_finite() {
         z.clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1])

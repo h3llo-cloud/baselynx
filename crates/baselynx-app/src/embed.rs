@@ -26,10 +26,11 @@ use crate::ui::workspace::Workspace;
 /// The key context of the embedded workspace: its own shortcuts act only while it has the focus.
 pub const CONTEXT: &str = "BaselynxEmbed";
 
-/// Registers what the embedded screens need: the bindings scoped to baselynx's views, and a few
-/// workspace commands under [`CONTEXT`]. The palette, tab, zoom and quit shortcuts are left to the
-/// host.
+/// Registers what the embedded screens need: baselynx's sizes (the host's theme stays), the
+/// bindings scoped to baselynx's views, and a few workspace commands under [`CONTEXT`]. The
+/// palette, tab, zoom and quit shortcuts are left to the host.
 pub fn init(cx: &mut App) {
+    crate::ui::tokens::install_embedded(cx);
     let mut b = scoped(cx);
     b.extend([
         key("secondary-t", NewConsole, Some(CONTEXT), cx),
