@@ -107,7 +107,15 @@ pub fn key<A: Action>(keys: &str, action: A, context: Option<&str>, cx: &App) ->
 }
 
 pub fn bind(cx: &mut App) {
-    let bindings = [
+    let mut bindings = window_wide(cx);
+    bindings.extend(scoped(cx));
+    cx.bind_keys(bindings);
+}
+
+/// Bindings that act anywhere in the window: the palette, tabs, zoom, quit. An application that
+/// embeds the workspace keeps these for itself (`embed::init` leaves them out).
+pub fn window_wide(cx: &App) -> Vec<KeyBinding> {
+    vec![
         key("secondary-k", OpenPalette, None, cx),
         key("secondary-t", NewConsole, None, cx),
         key("secondary-b", ToggleSidebar, None, cx),
@@ -148,14 +156,21 @@ pub fn bind(cx: &mut App) {
         key("secondary-shift-t", ReopenClosedTab, Some("Input"), cx),
         key("ctrl-tab", NextTab, Some("Input"), cx),
         key("ctrl-shift-tab", PrevTab, Some("Input"), cx),
-        // record panel and keys (3.3, 3.4)
-        key("secondary-i", ToggleRecord, Some(TABLE), cx),
-        key("secondary-i", ToggleRecord, Some(CONSOLE), cx),
-        key("f4", FollowKey, Some(GRID), cx),
         key("alt-[", TrailBack, None, cx),
         key("alt-]", TrailForward, None, cx),
         // sidebar tree (3.7)
         key("secondary-shift-k", FocusSidebarFilter, None, cx),
+    ]
+}
+
+/// Bindings that act only inside baselynx's own views (sidebar, table, console, grid, filter,
+/// cell editor).
+pub fn scoped(cx: &App) -> Vec<KeyBinding> {
+    vec![
+        // record panel and keys (3.3, 3.4)
+        key("secondary-i", ToggleRecord, Some(TABLE), cx),
+        key("secondary-i", ToggleRecord, Some(CONSOLE), cx),
+        key("f4", FollowKey, Some(GRID), cx),
         key("up", SideUp, Some(SIDEBAR), cx),
         key("down", SideDown, Some(SIDEBAR), cx),
         key("left", SideLeft, Some(SIDEBAR), cx),
@@ -217,6 +232,5 @@ pub fn bind(cx: &mut App) {
         key("up", ConfirmEditUp, Some(CELL_EDITOR), cx),
         key("down", ConfirmEditDown, Some(CELL_EDITOR), cx),
         key("escape", CancelEdit, Some(CELL_EDITOR), cx),
-    ];
-    cx.bind_keys(bindings);
+    ]
 }

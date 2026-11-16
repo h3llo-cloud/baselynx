@@ -54,6 +54,12 @@ pub struct RecordPanel {
     scroll: ScrollHandle,
 }
 
+impl Default for RecordPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecordPanel {
     pub fn new() -> Self {
         Self {

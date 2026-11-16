@@ -507,7 +507,10 @@ impl Workspace {
             Row::Conn(id) => {
                 let ro = self.project.connection(id).is_some_and(|c| c.read_only);
                 let restore = self.project.connection(id).is_some_and(|c| c.allow_restore);
-                PopupMenu::build(window, cx, move |m, _, _| conn_menu(m, weak.clone(), id, ro, restore))
+                let embedded = self.embed.is_some();
+                PopupMenu::build(window, cx, move |m, _, _| {
+                    conn_menu(m, weak.clone(), id, ro, restore, embedded)
+                })
             }
             Row::Rel(..) | Row::Match(..) => {
                 let Some((id, schema, name)) = self.side_relation(row) else {
@@ -709,16 +712,16 @@ impl Workspace {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                     })
                     .context_menu(move |menu: PopupMenu, _, cx| {
-                        let (ro, restore) = weak
+                        let (ro, restore, embedded) = weak
                             .upgrade()
                             .and_then(|w| {
-                                w.read(cx)
-                                    .project
+                                let w = w.read(cx);
+                                w.project
                                     .connection(id)
-                                    .map(|c| (c.read_only, c.allow_restore))
+                                    .map(|c| (c.read_only, c.allow_restore, w.embed.is_some()))
                             })
-                            .unwrap_or((false, false));
-                        conn_menu(menu, weak.clone(), id, ro, restore)
+                            .unwrap_or((false, false, false));
+                        conn_menu(menu, weak.clone(), id, ro, restore, embedded)
                     })
                     .into_any_element()
             }
@@ -848,7 +851,14 @@ impl Workspace {
         self.rebuild_side_rows();
         let empty = self.project.connections.is_empty();
         let focused = self.sidebar_focus.is_focused(window);
-        let body: AnyElement = if empty {
+        let body: AnyElement = if empty && self.embed.is_some() {
+            div()
+                .p_4()
+                .text_sm()
+                .text_color(tokens::secondary_text(cx))
+                .child("No connection.")
+                .into_any_element()
+        } else if empty {
             v_flex()
                 .p_4()
                 .gap_2()
@@ -926,29 +936,33 @@ impl Workspace {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Connections"))
-                    .child(
-                        h_flex()
-                            .child(
-                                Button::new("open-config")
-                                    .icon(gpui_kit::assets::IconName::Database)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Open a config file (baselynx.yaml)")
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.open_config(&OpenConfig, window, cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("add-connection")
-                                    .icon(IconName::Plus)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Add connection")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_connection(&AddConnection, window, cx)
-                                    })),
-                            ),
-                    ),
+                    .when(self.embed.is_none(), |d| {
+                        d.child(
+                            h_flex()
+                                .child(
+                                    Button::new("open-config")
+                                        .icon(gpui_kit::assets::IconName::Database)
+                                        .xsmall()
+                                        .ghost()
+                                        .tooltip("Open a config file (baselynx.yaml)")
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.open_config(&OpenConfig, window, cx)
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("add-connection")
+                                        .icon(IconName::Plus)
+                                        .xsmall()
+                                        .ghost()
+                                        .tooltip("Add connection")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.add_connection(&AddConnection, window, cx)
+                                        })),
+                                ),
+                        )
+                    }),
             )
             .when(!empty, |d| {
                 d.child(
@@ -982,6 +996,7 @@ pub(super) fn conn_menu(
     id: Uuid,
     read_only: bool,
     allow_restore: bool,
+    embedded: bool,
 ) -> PopupMenu {
     let item = |label: &str, f: fn(&mut Workspace, Uuid, &mut Window, &mut Context<Workspace>)| {
         let w = weak.clone();
@@ -989,15 +1004,20 @@ pub(super) fn conn_menu(
             let _ = w.update(cx, |this, cx| f(this, id, window, cx));
         })
     };
-    menu.item(item("Connect", |this, id, window, cx| this.connect(id, window, cx)))
+    let menu = menu
+        .item(item("Connect", |this, id, window, cx| this.connect(id, window, cx)))
         .item(item("Disconnect", |this, id, _, cx| this.disconnect(id, cx)))
         .item(item("New console", |this, id, window, cx| {
             this.open_console(id, None, window, cx)
         }))
         .item(item("Refresh", |this, id, window, cx| {
             this.refresh_connection(id, window, cx)
-        }))
-        .separator()
+        }));
+    // An embedding application owns its connections: no read-only switch, backups or editing.
+    if embedded {
+        return menu;
+    }
+    menu.separator()
         // Look without touching (3.8).
         .item(
             item("Read-write (primary)", |this, id, window, cx| {

@@ -3,28 +3,13 @@
 // No console window on Windows release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod actions;
-mod app_icon;
-mod app_state;
-mod assets;
-mod completion;
-mod edit_model;
-mod format;
-mod page_diff;
-mod palette_rank;
-mod row_text;
-mod ui;
-#[cfg(test)]
-mod ui_tests;
-mod value_fmt;
-
 use std::sync::Arc;
 
+use baselynx_app::ui::workspace::Workspace;
+use baselynx_app::{actions, app_icon, assets, ui};
 use baselynx_core::APP_NAME;
 use baselynx_core::store::{KeyringStore, Store};
 use gpui_kit::*;
-
-use crate::ui::workspace::Workspace;
 
 /// The config file to open at start: `BASELYNX_CONFIG_FILE`, else `baselynx.yaml` beside the
 /// binary. A scratch `BASELYNX_CONFIG_DIR` (tests, trying things out) turns the second off, so

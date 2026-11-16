@@ -267,8 +267,18 @@ pub struct Workspace {
     menubar: menubar::MenuBar,
     /// Passwords from the config file, by connection.
     config_passwords: HashMap<Uuid, String>,
+    /// Set when another application embeds the workspace (`crate::embed`).
+    pub(crate) embed: Option<EmbedFlags>,
     _subs: Vec<Subscription>,
 }
+
+/// How an embedded workspace differs from baselynx's own window.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EmbedFlags {
+    pub read_only: bool,
+}
+
+impl EventEmitter<crate::embed::EmbedEvent> for Workspace {}
 
 /// Reads a config file and makes its project match it: the project opened from the file
 /// before, one that already holds its databases, or a new one. Saved before returning.
@@ -361,6 +371,7 @@ impl Workspace {
             backups: Default::default(),
             menubar: Default::default(),
             config_passwords: HashMap::new(),
+            embed: None,
             _subs: subs,
         };
         // The window's overlay layer does not exist yet; anything that can open a dialog
@@ -398,6 +409,138 @@ impl Workspace {
             }
         });
         this
+    }
+
+    /// The workspace inside another application (`crate::embed`): `project` holds exactly the
+    /// given connections, `passwords` stay in memory, and nothing outside the tables and consoles
+    /// is offered.
+    pub(crate) fn embedded(
+        store: Store,
+        secrets: Arc<dyn SecretStore>,
+        project: Project,
+        passwords: HashMap<Uuid, String>,
+        flags: EmbedFlags,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (side, side_sub) = SideState::new(window, cx);
+        let this = Self {
+            store,
+            secrets,
+            project: Project::new(""),
+            projects: Vec::new(),
+            conns: HashMap::new(),
+            tabs: Vec::new(),
+            active: None,
+            sidebar_visible: true,
+            recent: Vec::new(),
+            console_counter: 0,
+            save_task: None,
+            focus_handle: cx.focus_handle(),
+            sidebar_focus: cx.focus_handle(),
+            tab_subs: HashMap::new(),
+            closed: Vec::new(),
+            connect_batch: None,
+            side,
+            trail: Vec::new(),
+            trail_pos: 0,
+            history: Vec::new(),
+            _history_save: None,
+            backups: Default::default(),
+            menubar: Default::default(),
+            config_passwords: passwords,
+            embed: Some(flags),
+            _subs: vec![side_sub],
+        };
+        cx.defer_in(window, move |this, window, cx| this.load_project(project, window, cx));
+        this
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        self.embed.is_some()
+    }
+
+    /// Whether connection `id` has a session now.
+    pub fn is_connected(&self, id: Uuid) -> bool {
+        self.conns
+            .get(&id)
+            .is_some_and(|rt| matches!(rt.status, ConnStatus::Connected { .. }))
+    }
+
+    /// Gives the keyboard focus to the active tab, or to the workspace itself.
+    pub fn focus_main(&self, window: &mut Window, cx: &mut App) {
+        match self.active.and_then(|i| self.tabs.get(i)).cloned() {
+            Some(t) => t.focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
+    /// Tells the host that connection `id` failed or was lost.
+    fn embed_lost(&self, id: Uuid, error: &str, cx: &mut Context<Self>) {
+        if self.embed.is_some() {
+            cx.emit(crate::embed::EmbedEvent::ConnectionLost {
+                id,
+                error: error.to_string(),
+            });
+        }
+    }
+
+    /// `crate::embed::DbWorkspace::set_connection`: the connection keeps its id and tabs; its
+    /// session is opened again with the new address and password.
+    pub(crate) fn embed_set_connection(
+        &mut self,
+        config: ConnectionConfig,
+        password: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = config.id;
+        let Some(slot) = self.project.connections.iter_mut().find(|c| c.id == id) else {
+            return;
+        };
+        *slot = config;
+        if let Some(p) = &password {
+            let _ = self.secrets.set(id, p);
+            self.config_passwords.insert(id, p.clone());
+        }
+        if let Some(rt) = self.conns.get_mut(&id) {
+            rt.password = password.or(rt.password.take());
+            rt.status = ConnStatus::Disconnected;
+        }
+        self.connect_with(id, false, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn embed_palette_items(&self, query: &str) -> Vec<crate::embed::PaletteItem> {
+        let mut all = Vec::new();
+        for c in &self.project.connections {
+            let Some(rt) = self.conns.get(&c.id) else { continue };
+            for r in rt.all_relations.iter() {
+                all.push(crate::embed::PaletteItem {
+                    connection: c.id,
+                    schema: r.schema.clone(),
+                    table: r.name.clone(),
+                    label: format!("{}.{}", r.schema, r.name),
+                    detail: c.name.clone(),
+                });
+            }
+        }
+        let keys: Vec<(String, u8)> = all.iter().map(|p| (p.label.clone(), 0u8)).collect();
+        crate::palette_rank::rank(&keys, query, 50)
+            .into_iter()
+            .map(|i| all[i].clone())
+            .collect()
+    }
+
+    pub(crate) fn embed_open_table(
+        &mut self,
+        conn: Uuid,
+        schema: &str,
+        table: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_table(conn, schema, table, window, cx);
     }
 
     // ------------------------------------------------------------------ projects
@@ -844,6 +987,7 @@ impl Workspace {
                     baselynx_core::model::Engine::Sqlite => "main".to_string(),
                     baselynx_core::model::Engine::Mysql => c.database.clone(),
                 });
+                let mut lost: Option<String> = None;
                 let Some(rt) = this.conns.get_mut(&id) else { return };
                 match result {
                     Ok((s, schemas, all)) => {
@@ -870,7 +1014,11 @@ impl Workspace {
                         }
                         rt.status = ConnStatus::Failed(e.to_string());
                         rt.expanded |= expand;
+                        lost = Some(e.to_string());
                     }
+                }
+                if let Some(e) = lost {
+                    this.embed_lost(id, &e, cx);
                 }
                 this.after_status_change(cx);
                 cx.notify();
@@ -987,12 +1135,18 @@ impl Workspace {
     }
 
     fn add_connection(&mut self, _: &AddConnection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.embed.is_some() {
+            return;
+        }
         self.open_connection_form(ConnectionConfig::new(""), true, window, cx);
     }
 
     /// "Open config file…": a `baselynx.yaml` becomes a project (or updates the one opened
     /// from it before), which then opens.
     fn open_config(&mut self, _: &OpenConfig, window: &mut Window, cx: &mut Context<Self>) {
+        if self.embed.is_some() {
+            return;
+        }
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1918,6 +2072,9 @@ impl Workspace {
 
     /// A `postgres://` URL pasted while the sidebar has focus opens the form filled in.
     fn paste_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.embed.is_some() {
+            return;
+        }
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
             return;
         };
@@ -2149,7 +2306,10 @@ impl Workspace {
                     .gap_2()
                     .items_start()
                     .child(h_flex().w_full().justify_center().text_xl().pb_2().child(APP_NAME))
-                    .child(line("Ctrl+K", "go to a table or command"))
+                    // Embedded, Ctrl+K is the host's.
+                    .when(self.embed.is_none(), |d| {
+                        d.child(line("Ctrl+K", "go to a table or command"))
+                    })
                     .child(line("Ctrl+T", "new console"))
                     .child(line("", "double-click a table to open it"))
                     .child(line("Ctrl+B", "toggle the sidebar")),
@@ -2307,8 +2467,9 @@ impl Render for Workspace {
         } else {
             main
         };
+        let embedded = self.embed.is_some();
         v_flex()
-            .key_context(WORKSPACE)
+            .key_context(if embedded { crate::embed::CONTEXT } else { WORKSPACE })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::new_console))
@@ -2345,9 +2506,7 @@ impl Render for Workspace {
                     this.close_tab(a, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
-                this.reopen_closed_tab(window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| this.reopen_closed_tab(window, cx)))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
                 if let Some(a) = this.active {
                     let n = this.tabs.len();
@@ -2386,7 +2545,7 @@ impl Render for Workspace {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_title_bar(cx))
+            .when(!embedded, |d| d.child(self.render_title_bar(cx)))
             .child(div().flex_1().min_h_0().child(content))
             .child(self.render_status_bar(cx))
     }

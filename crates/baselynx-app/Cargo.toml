@@ -19,6 +19,11 @@ path-guid = "4C780C08-A65D-4BA6-97A0-921A440DD2AF"
 license = false
 eula = false
 
+# The application as a library, so another program can embed its database workspace (`embed`).
+[lib]
+name = "baselynx_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "baselynx"
 path = "src/main.rs"

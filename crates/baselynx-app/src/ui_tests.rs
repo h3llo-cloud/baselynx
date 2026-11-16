@@ -262,3 +262,225 @@ fn tab_menu_closes_others_and_reopens(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(tab_ids(&ws, cx), vec![ids[3]]));
 }
+
+// ---------------------------------------------------------------- embedded in another application
+
+mod embedded {
+    use super::*;
+    use crate::embed::{DbWorkspace, EmbedConnection, EmbedEvent, EmbedOptions};
+    use gpui_kit::{
+        Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, div,
+    };
+
+    /// A host window: an area of its own that can hold the focus, beside the embedded workspace.
+    struct Host {
+        focus: FocusHandle,
+        ws: Entity<DbWorkspace>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().id("host-area").track_focus(&self.focus).h_8())
+                .child(div().size_full().child(self.ws.clone()))
+        }
+    }
+
+    fn init_embed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::embed::init(cx);
+            crate::ui::tokens::install(crate::ui::tokens::ThemePref::Light, 1.0, cx);
+        });
+    }
+
+    fn test_connection() -> (EmbedConnection, Option<String>) {
+        let db = common::db();
+        let mut config = db.config.clone();
+        config.id = Uuid::new_v4();
+        config.name = "embedded".into();
+        config.save_password = true;
+        (
+            EmbedConnection {
+                config,
+                password: db.password.clone(),
+            },
+            db.password.clone(),
+        )
+    }
+
+    fn open_host(
+        cx: &mut TestAppContext,
+        conns: Vec<EmbedConnection>,
+        options: EmbedOptions,
+    ) -> (AnyWindowHandle, Entity<Host>, Entity<DbWorkspace>) {
+        let mut ws_out = None;
+        let window = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let ws = cx.new(|cx| DbWorkspace::new(conns, options, window, cx));
+                ws_out = Some(ws.clone());
+                cx.new(|cx| Host {
+                    focus: cx.focus_handle(),
+                    ws,
+                })
+            })
+            .expect("open the window")
+        });
+        let (w, host) = window;
+        (w, host, ws_out.unwrap())
+    }
+
+    fn inner(ws: &Entity<DbWorkspace>, cx: &App) -> Entity<Workspace> {
+        ws.read(cx).workspace().clone()
+    }
+
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(files_under(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[gpui_kit::test]
+    fn the_embedded_workspace_shows_its_connections_and_nothing_else(cx: &mut TestAppContext) {
+        init_embed(cx);
+        let root = tempfile::tempdir().unwrap();
+        let (conn, password) = test_connection();
+        let id = conn.config.id;
+        let options = EmbedOptions {
+            store_root: root.path().to_path_buf(),
+            review_all_writes: false,
+            read_only: false,
+        };
+        let (w, _host, ws) = open_host(cx, vec![conn], options);
+        wait_until(cx, w, "the connection", |cx| inner(&ws, cx).read(cx).is_connected(id));
+        frame(cx, w, |window, cx| {
+            window.render_frame(cx);
+            for absent in [
+                "menu-file",
+                "add-connection",
+                "open-config",
+                "first-connection",
+                "first-import",
+            ] {
+                assert!(window.try_find(absent).is_none(), "{absent} is shown");
+            }
+        });
+        // The host's "Go to" finds tables, and opens one.
+        let items = cx.update(|cx| ws.read(cx).palette_items("customers", cx));
+        assert!(items.iter().any(|i| i.label == "demo.customers"), "{items:?}");
+        frame(cx, w, |window, cx| {
+            ws.update(cx, |d, cx| d.open_table(id, "demo", "customers", window, cx))
+        });
+        wait_until(cx, w, "the table tab", |cx| !inner(&ws, cx).read(cx).tabs.is_empty());
+        // Tabs are kept in the host's folder; no password ever is.
+        cx.update(|cx| inner(&ws, cx).update(cx, |w, cx| w.save_now(cx)));
+        cx.run_until_parked();
+        let files = files_under(root.path());
+        assert!(!files.is_empty(), "nothing was kept");
+        if let Some(pw) = password.filter(|p| !p.is_empty()) {
+            for f in files {
+                let text = std::fs::read_to_string(&f).unwrap_or_default();
+                assert!(!text.contains(&pw), "the password is in {f:?}");
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn read_only_and_review_reach_every_connection(cx: &mut TestAppContext) {
+        init_embed(cx);
+        let root = tempfile::tempdir().unwrap();
+        let (conn, _) = test_connection();
+        let options = EmbedOptions {
+            store_root: root.path().to_path_buf(),
+            review_all_writes: true,
+            read_only: true,
+        };
+        let (_w, _host, ws) = open_host(cx, vec![conn], options);
+        cx.run_until_parked();
+        let c = cx.update(|cx| inner(&ws, cx).read(cx).project.connections[0].clone());
+        assert!(c.read_only);
+        assert!(!c.save_password);
+        assert_eq!(c.color, baselynx_core::model::ConnectionColor::Red);
+    }
+
+    #[gpui_kit::test]
+    fn its_keys_act_only_while_it_has_the_focus(cx: &mut TestAppContext) {
+        init_embed(cx);
+        let root = tempfile::tempdir().unwrap();
+        let (conn, _) = test_connection();
+        let id = conn.config.id;
+        let options = EmbedOptions {
+            store_root: root.path().to_path_buf(),
+            review_all_writes: false,
+            read_only: false,
+        };
+        let (w, host, ws) = open_host(cx, vec![conn], options);
+        wait_until(cx, w, "the connection", |cx| inner(&ws, cx).read(cx).is_connected(id));
+        // The host area has the focus: Ctrl+T does nothing here.
+        frame(cx, w, |window, cx| {
+            let f = host.read(cx).focus.clone();
+            f.focus(window, cx);
+        });
+        cx.simulate_keystrokes(w, "ctrl-t");
+        cx.run_until_parked();
+        assert!(cx.update(|cx| inner(&ws, cx).read(cx).tabs.is_empty()));
+        // The workspace has it: a console opens.
+        frame(cx, w, |window, cx| {
+            inner(&ws, cx).update(cx, |w, cx| w.focus_main(window, cx))
+        });
+        cx.simulate_keystrokes(w, "ctrl-t");
+        wait_until(cx, w, "a console", |cx| inner(&ws, cx).read(cx).tabs.len() == 1);
+        // The window-wide shortcuts stay with the host: Ctrl+W does not close the tab.
+        frame(cx, w, |window, cx| {
+            inner(&ws, cx).update(cx, |w, cx| w.focus_main(window, cx))
+        });
+        cx.simulate_keystrokes(w, "ctrl-w");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| inner(&ws, cx).read(cx).tabs.len()), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_lost_connection_is_reported_and_set_connection_restores_it(cx: &mut TestAppContext) {
+        init_embed(cx);
+        let root = tempfile::tempdir().unwrap();
+        let (good, _) = test_connection();
+        let id = good.config.id;
+        // First the address is wrong (nothing listens there).
+        let mut bad = good.clone();
+        bad.config.host = "127.0.0.1".into();
+        bad.config.port = 1;
+        let options = EmbedOptions {
+            store_root: root.path().to_path_buf(),
+            review_all_writes: false,
+            read_only: false,
+        };
+        let (w, _host, ws) = open_host(cx, vec![bad], options);
+        let events: Entity<Vec<EmbedEvent>> = cx.update(|cx| cx.new(|_| Vec::new()));
+        let sink = events.clone();
+        let _sub = cx.update(|cx| {
+            cx.subscribe(&ws, move |_, ev: &EmbedEvent, cx| {
+                sink.update(cx, |v, _| v.push(ev.clone()))
+            })
+        });
+        wait_until(cx, w, "the loss", |cx| !events.read(cx).is_empty());
+        let first = cx.update(|cx| events.read(cx)[0].clone());
+        assert!(
+            matches!(&first, EmbedEvent::ConnectionLost { id: x, .. } if *x == id),
+            "{first:?}"
+        );
+        // The host repaired the route: the same connection, the right address.
+        frame(cx, w, |window, cx| {
+            ws.update(cx, |ws, cx| ws.set_connection(id, good.clone(), window, cx))
+        });
+        wait_until(cx, w, "the connection", |cx| inner(&ws, cx).read(cx).is_connected(id));
+    }
+}
