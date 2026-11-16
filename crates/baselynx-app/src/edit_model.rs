@@ -47,6 +47,14 @@ pub struct EditModel {
     /// Edit states before each change, oldest first.
     undo: Vec<Edits>,
     redo: Vec<Edits>,
+    /// Changes with every change of the rows or the edits, across models too, so that views can
+    /// skip work while nothing changed (the record panel is synced on every frame).
+    generation: u64,
+}
+
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl EditModel {
@@ -54,8 +62,14 @@ impl EditModel {
         Self {
             loaded,
             columns,
+            generation: next_generation(),
             ..Default::default()
         }
+    }
+
+    /// See the field: equal generations mean equal rows and edits.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Replaces the loaded rows and drops every pending edit.
@@ -72,6 +86,7 @@ impl EditModel {
     }
 
     fn restore(&mut self, e: Edits) {
+        self.generation = next_generation();
         self.changed = e.changed;
         self.deleted = e.deleted;
         self.new_rows = e.new_rows;
@@ -116,6 +131,7 @@ impl EditModel {
 
     /// Appends streamed rows (console results).
     pub fn append_loaded(&mut self, mut rows: Vec<Row>) {
+        self.generation = next_generation();
         self.loaded.append(&mut rows);
     }
 
@@ -213,6 +229,7 @@ impl EditModel {
     }
 
     fn set_inner(&mut self, row: usize, col: usize, value: CellValue) {
+        self.generation = next_generation();
         if self.is_new(row) {
             if let Some(r) = self.new_rows.get_mut(row - self.loaded.len())
                 && col < r.len()
@@ -233,6 +250,7 @@ impl EditModel {
     }
 
     fn revert_inner(&mut self, row: usize, col: usize) {
+        self.generation = next_generation();
         if self.is_new(row) {
             if let Some(r) = self.new_rows.get_mut(row - self.loaded.len())
                 && col < r.len()
@@ -247,6 +265,7 @@ impl EditModel {
     /// Appends a new row; returns its index.
     pub fn add_row(&mut self) -> usize {
         let before = self.edits();
+        self.generation = next_generation();
         self.new_rows.push(vec![None; self.columns]);
         self.checkpoint(before);
         self.row_count() - 1
@@ -260,6 +279,7 @@ impl EditModel {
     }
 
     fn toggle_inner(&mut self, row: usize) {
+        self.generation = next_generation();
         if self.is_new(row) {
             let ix = row - self.loaded.len();
             if ix < self.new_rows.len() {

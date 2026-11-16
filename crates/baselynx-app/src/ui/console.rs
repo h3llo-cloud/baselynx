@@ -135,6 +135,8 @@ pub struct ConsoleView {
     export: Option<ExportJob>,
     /// The selected result row, top to bottom.
     record: Option<Entity<RecordPanel>>,
+    /// What the record panel was last filled from; render skips the work while it is the same.
+    record_key: Option<u64>,
     /// `None`: guarded on red and amber connections; the toolbar switch overrides it.
     guard_mode: Option<bool>,
     tx: Option<TxState>,
@@ -213,6 +215,7 @@ impl ConsoleView {
             last_error: None,
             export: None,
             record: None,
+            record_key: None,
             guard_mode: None,
             tx: None,
             where_warning: None,
@@ -401,6 +404,25 @@ impl ConsoleView {
     /// The selected result row into the record panel (read-only).
     fn sync_record(&mut self, cx: &mut Context<Self>) {
         let Some(panel) = self.record.clone() else { return };
+        // Runs on every frame; skip it while the selected row and its values are the same.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let g = self.grid.read(cx);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (
+                g.selected_cell().map(|(r, _)| r),
+                self.has_result,
+                g.delegate().model.generation(),
+                g.delegate().columns.len(),
+                panel.entity_id(),
+            )
+                .hash(&mut h);
+            h.finish()
+        };
+        if self.record_key == Some(key) {
+            return;
+        }
+        self.record_key = Some(key);
         let g = self.grid.read(cx);
         let row = g.selected_cell().map(|(r, _)| r);
         let d = g.delegate();

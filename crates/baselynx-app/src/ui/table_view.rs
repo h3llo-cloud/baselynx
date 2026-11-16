@@ -117,6 +117,8 @@ pub struct TableView {
     reconnecting: bool,
     note: Option<SharedString>,
     record: Option<Entity<RecordPanel>>,
+    /// What the record panel was last filled from; render skips the work while it is the same.
+    record_key: Option<u64>,
     record_width: f32,
     assist: filter_assist::FilterAssist,
     /// A selection change we made ourselves, so it does not end the column selection.
@@ -256,6 +258,7 @@ impl TableView {
             reconnecting: false,
             note: None,
             record: None,
+            record_key: None,
             record_width: 360.,
             assist: filter_assist::FilterAssist::new(),
             expect_select: None,

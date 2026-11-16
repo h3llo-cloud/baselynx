@@ -470,6 +470,29 @@ impl TableView {
     /// the selection, edits and reloads. Only changes reach the panel.
     pub(super) fn sync_record(&mut self, cx: &mut Context<Self>) {
         let Some(panel) = self.record.clone() else { return };
+        // This runs on every frame (scrolling redraws every frame); copying the selected row's
+        // values each time made scrolling slow with large values. Skip it while nothing it shows
+        // has changed.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let g = self.grid.read(cx);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (
+                self.selected(cx),
+                self.page,
+                g.delegate().model.generation(),
+                g.delegate().columns.len(),
+                panel.entity_id(),
+                self.rel.is_some(),
+            )
+                .hash(&mut h);
+            self.child_counts.as_ref().map(|c| (&c.key, &c.counts)).hash(&mut h);
+            h.finish()
+        };
+        if self.record_key == Some(key) {
+            return;
+        }
+        self.record_key = Some(key);
         let rel = self.rel.clone();
         let d = self.grid.read(cx).delegate();
         let Some((row, _)) = self.selected(cx) else {

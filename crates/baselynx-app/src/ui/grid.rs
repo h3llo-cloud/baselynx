@@ -380,11 +380,19 @@ fn measure_width(name: &str, type_label: &str, rows: &[Row], col: usize) -> f32 
 }
 
 fn one_line(s: &str) -> String {
-    let first = s.lines().next().unwrap_or("");
-    let multi = s.contains('\n');
-    let mut out: String = first.chars().take(CELL_CHARS).collect();
-    if multi || first.chars().count() > CELL_CHARS {
-        out.push('…');
+    // Every visible cell runs this on every frame: read at most what the cell shows, never the
+    // whole value (a JSON or text value can be megabytes).
+    let mut out = String::new();
+    for (taken, c) in s.chars().enumerate() {
+        if c == '\n' || taken == CELL_CHARS {
+            // A second line, or more of the first than fits; CRLF ends a line too.
+            if out.ends_with('\r') {
+                out.pop();
+            }
+            out.push('…');
+            return out;
+        }
+        out.push(c);
     }
     out
 }
@@ -810,6 +818,23 @@ pub fn apply_edit(delegate: &mut GridDelegate, row: usize, data_col: usize, valu
 #[cfg(test)]
 mod tests {
     use super::{display_value, is_text_type, normalize_bool};
+
+    #[test]
+    fn one_line_reads_only_what_a_cell_shows() {
+        use super::{CELL_CHARS, one_line};
+        assert_eq!(one_line("abc"), "abc");
+        assert_eq!(one_line(""), "");
+        assert_eq!(one_line("a\nb"), "a…");
+        assert_eq!(one_line("a\r\nb"), "a…");
+        assert_eq!(one_line("a\n"), "a…");
+        let long = "x".repeat(CELL_CHARS + 5);
+        assert_eq!(one_line(&long).chars().count(), CELL_CHARS + 1);
+        assert!(one_line(&long).ends_with('…'));
+        assert_eq!(one_line(&"y".repeat(CELL_CHARS)), "y".repeat(CELL_CHARS));
+        // A value of megabytes is cut at once.
+        let huge = "z".repeat(8 << 20);
+        assert_eq!(one_line(&huge).chars().count(), CELL_CHARS + 1);
+    }
 
     #[test]
     fn text_types_keep_empty_strings() {
